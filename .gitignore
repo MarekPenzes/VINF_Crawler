@@ -1,0 +1,10 @@
+# stiahnute stranky a vygenerovane data (da sa vytvorit znova cez main.py)
+data/
+
+# zalohy, nastroje a cache
+zaloha/
+graphify-out/
+__pycache__/
+
+# archiv na odovzdanie
+*.zip

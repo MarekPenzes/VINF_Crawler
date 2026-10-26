@@ -1,0 +1,400 @@
+===== 1. Opis projektu =====
+
+  * **Cieľ:** vyhľadávanie futbalových hráčov podľa textu (bio, kluby, súťaže) a podľa faktov (vek, výška, noha, zápasy a góly za klub a reprezentáciu).
+  * **Postup:**
+    * crawler stiahne profily hráčov z worldfootball.com,
+    * regex extraktor z HTML vytiahne údaje do TSV,
+    * vlastný indexer postaví invertovaný index (TF),
+    * vyhľadávanie z príkazového riadku zoradí hráčov podľa TF-IDF (kosínusová podobnosť), voliteľne s filtrami.
+  * **Pravidlá:** čistý Python, bez databázy, dáta v TSV, vlastný index.
+  * **Spustenie:** všetko cez spoločný vstup ''main.py''.
+
+<code>
+py main.py crawl [--target N] [--retry]
+py main.py extract
+py main.py index
+py main.py search "young striker ajax academy" age<23 --idf prob
+py main.py compare
+py main.py stats --html
+py main.py test
+py main.py all      (extract + index + test)
+</code>
+
+===== 2. Zdroj dát a extrahované dáta =====
+
+  * **worldfootball.com**, profily hráčov ''%%/people/{slug}/{id}%%''
+    (napr. [[https://worldfootball.com/people/b-saka/640]])
+  * **Prečo táto stránka:**
+    * kompletná tabuľka štatistík po sezónach (zápasy, góly, asistencie, karty, rating),
+    * text bio,
+    * statické HTML,
+    * veľa odkazov na ďalších hráčov a tímy.
+  * **Spojenie s Wikipédiou:** cez meno a dátum narodenia (oboje je na stránke hráča).
+  * **Výstup extraktora:**
+    * ''data/players.tsv'': 1 riadok = 1 hráč, 17 stĺpcov,
+    * ''data/career.tsv'': 1 riadok = sezóna, tím a súťaž, 16 stĺpcov.
+
+==== 5 ukážok ====
+
+^ Stránka ^ Meno ^ Pozícia ^ Klub ^ Narodený ^ Výška ^ Noha ^ Klub záp./góly/asist. ^ Reprezentácia záp./góly/asist. ^
+| [[https://worldfootball.com/people/j-bellingham-20811/20811]] | Jude Bellingham | Midfielder | Real Madrid | 2003-06-29 | 186 | Right | 325 / 77 / 60 | England 60 / 14 / 12 |
+| [[https://worldfootball.com/people/l-modri/21362]] | Luka Modrić | Midfielder | AC Milan | 1985-09-09 | 172 | Right | 778 / 59 / 105 | Croatia 149 / 23 / 22 |
+| [[https://worldfootball.com/people/m-neuer/10883]] | Manuel Neuer | Goalkeeper | FC Bayern München | 1986-03-27 | 193 | Right | 777 / 0 / 4 | Germany 111 / 0 / 1 |
+| [[https://worldfootball.com/people/o-gloukh/106]] | Oscar Gloukh | Midfielder | Ajax | 2004-04-01 | 171 | (chýba) | 185 / 46 / 42 | Israel 33 / 5 / 3 |
+| [[https://worldfootball.com/people/n-tjoe-a-on/65]] | Nathan Tjoe-A-On | Defender | Willem II | 2001-12-22 | 182 | Left | 114 / 3 / 4 | Indonesia 14 / 0 / 1 |
+
+  * **Ďalšie stĺpce players.tsv:** ''nationality'', ''url'', ''bio'' (napr. //"Born in Stourbridge on 29 June 2003, Jude Bellingham joined Birmingham City as an under-8"//).
+  * **Reprezentácia:** berie sa riadok hlavného (seniorského) tímu, nie súčet "Career total", ktorý by spočítal A-tím spolu s U21.
+
+Ukážka ''career.tsv'' (Bellingham):
+
+^ section ^ season ^ team ^ competition ^ apps ^ lineups ^ sub_on ^ sub_off ^ goals ^ penalties ^ assists ^ yellow ^ second_yellow ^ red ^ rating ^
+| club | 2026/2027 | Real Madrid | La Liga | 8 | 7 | 1 | 4 | 3 | 0 | 2 | 2 | 0 | 0 | 7.64 |
+| club | 2026/2027 | Real Madrid | Champions League | 1 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 7.02 |
+
+===== 3. Otázky a odpovede =====
+
+^ Otázka ^ Dopyt ^ Odpoveď systému ^
+| Ktorí nemeckí brankári merajú aspoň 195 cm? | ''%%goalkeeper nationality=germany height>=195%%'' | 7 hráčov, napr. Kaylen, Johannes Siebeking, Matthias Köbbing |
+| Ktorí Angličania hrajú za Real Madrid? | ''%%real madrid nationality=england%%'' | Jude Bellingham, Trent Alexander-Arnold |
+| Kto dal za reprezentáciu aspoň 60 gólov? | ''%%nat_goals>=60%%'' | Erling Haaland, Harry Kane, Kylian Mbappé |
+| Ktorí mladí útočníci prešli akadémiou Ajaxu? | ''%%young striker ajax academy%%'' | Aaron Bouwman, Ryan Gravenberch, Brian Brobbey |
+| Ktorí hráči získali Zlatú loptu (Ballon d'Or)? | ''%%ballon%%'' | Ousmane Dembélé, Rodri, Vinicius Junior a ďalší (spolu 6) |
+| Ktorý brankár je známy chytaním penált? | ''%%goalkeeper penalty saves%%'' | Rome-Jayden Owusu-Oduro, Mile Svilar, Florian Müller |
+
+  * **Filter:** pole, operátor a hodnota, napr. ''%%age<23%%''.
+  * **Operátory:** ''%%= != > < >= <= ~%%'' (''~'' = obsahuje).
+  * **Polia:** ''name, position, club, nationality, national_team, foot, age, height, club_apps, club_goals, club_assists, nat_apps, nat_goals, nat_assists''.
+
+===== 4. Aké frameworky a knižnice používam =====
+
+Všetko je v **Pythone**:
+
+^ Knižnica ^ Na čo ^
+| ''curl_cffi'' | HTTP requesty v crawleri. Rovnaké API ako ''requests'', ale posiela TLS odtlačok a hlavičky ako Chrome (dôvod v časti 7). |
+| ''re'' | typ URL, vyťahovanie odkazov, filter hráčov, extrakcia entít, tokenizer |
+| ''json'' | uloženie stavu crawlu, dekódovanie reťazcov z JSON-LD |
+| ''random'', ''time'' | náhodný delay, náhodný výber z fronty |
+| ''html'', ''unicodedata'' | HTML entity na znaky, odstránenie diakritiky |
+| ''math'', ''collections'' | TF-IDF, ''Counter'', ''defaultdict'' |
+| ''argparse'', ''importlib'' | parametre príkazov, spoločný vstup ''main.py'' |
+| ''unittest'' | unit testy extraktora (bonus) |
+| ''tiktoken'' | počet tokenov (bonus) |
+
+  * **Prečo nie Scrapy alebo Selenium:**
+    * stránka je statické HTML, takže JavaScript ani prehliadač netreba,
+    * pri jednom requeste naraz s pauzou by bol framework zbytočne zložitý.
+  * **Bez pandas, NLTK, BeautifulSoup a SQL:** TSV čítam a zapisujem vlastnými funkciami, extrakcia je čisto regex, tokenizer a stop slová sú vlastné.
+
+===== 5. Architektúra crawlera =====
+
+{{:user:marek.penzes:crawl_architecture.png |Diagram architektúry crawlera}}
+
+Inšpirácia: [[https://www.hellointerview.com/learn/system-design/problem-breakdowns/web-crawler]], zmenšené na jeden proces a jednu doménu.
+
+  * **Seedy:** Saka, Arsenal a 5 top líg. Sú to iba štartovacie body, ďalej sa crawler šíri cez odkazy (hráč, spoluhráči, klub, liga, ďalšie tímy).
+  * **Frontier:** 3 fronty (hráči, tímy, súťaže).
+    * Bežne sa berie hráč, každá 25. stránka je tím a každá 200. súťaž. Fronta hráčov sa nikdy nevyprázdni, inak by sa crawler k tímom nedostal.
+    * Výber z fronty je náhodný, nie FIFO. Pri FIFO by sa od Arsenalu išlo iba po Anglicku.
+  * **Fetcher:** 1 request naraz, 1 pokus na URL.
+  * **Parser:** regexom vytiahne odkazy, nové URL idú do front, každá URL sa navštívi iba raz.
+  * **Filter:** ukladá sa iba profil, ktorý má bio aj tabuľku štatistík. Tréneri a personál sa neukladajú, ale ich odkazy sa berú.
+  * **Uloženie:** ''%%data/html/{id}_{slug}.html%%'' hneď po stiahnutí.
+  * **Pokračovanie po prerušení:** každých 10 stránok sa uloží ''state.json'' (fronty, navštívené URL).
+  * **Retry:** chybné URL (403, 429, 5xx, timeout, Cloudflare challenge) ostanú v logu a po vyprázdnení front sa raz zopakujú. Ručne: ''%%py main.py crawl --retry%%''.
+  * **robots.txt:** ''%%User-agent: * Allow: /%%'', zakázané ''%%/api/, /cms, /healthz, /ops%%'' crawler preskakuje.
+
+===== 6. Metadáta =====
+
+Každý request sa zapíše do ''data/crawl_log.tsv''. Z neho sa počítajú štatistiky a podľa neho sa robí retry.
+
+^ time ^ status ^ kind ^ bytes ^ seconds ^ url ^
+| 2026-10-11 19:39:35 | 200 | player | 637882 | 2.73 | /people/b-saka/640 |
+| 2026-10-11 19:39:38 | 200 | player | 560569 | 1.65 | /people/b-white-637/637 |
+| 2026-10-26 15:15:40 | 200 | player | 554108 | 1.23 | /people/t-nakashima/55486 |
+
+  * **status:** HTTP kód, ''None'' = timeout alebo chyba siete, ''CF'' = challenge stránka Cloudflare so statusom 200.
+  * **kind:** typ stránky (''player'', ''team'', ''comp'').
+  * **bytes, seconds:** veľkosť odpovede a čas requestu.
+  * **state.json:** ''done'' (spracované URL), ''seen'' (URL, ktoré už boli vo fronte), ''queues'' (fronty).
+
+===== 7. Hlavičky, timeouty, sleepy =====
+
+^ Nastavenie ^ Hodnota ^ Dôvod ^
+| Hlavičky | ako Chrome (''curl_cffi'', ''impersonate="chrome"'') | Web je za Cloudflare. Pôvodne crawler bežal cez ''urllib.request'' s hlavičkami prehliadača (User-Agent Chrome, Accept, Accept-Language). Po približne 2000 hráčoch Cloudflare vracal každému requestu 403 "Just a moment". Blokoval klienta podľa TLS odtlačku, nie IP, lebo rovnaký request cez ''curl_cffi'' prešiel so statusom 200. Pôvodný fetch som preto nahradil. ''Session'' drží spojenie a cookies. |
+| Timeout | 20 s | Stránka má 450-650 kB, priemerná odpoveď 1.20 s. 20 s stačí aj pri pomalej odpovedi a zaseknutý request nezdrží crawl. |
+| Sleep | náhodne 2-3 s | Šetrnosť k serveru, ochrana pred banom, bez pravidelného rytmu. Pôvodne 1-2 s, zvýšené po bloku od Cloudflare. |
+| Pauza po bloku | 10 / 30 / 60 / 120 s | Podľa počtu blokov za sebou. Blok býva na celú IP, bez pauzy by padli aj ďalšie stránky. |
+| Paralelizmus | 1 request naraz | Rovnaký dôvod ako pri sleepe. |
+
+===== 8. Extrakcia URL z HTML =====
+
+Súbor ''crawler.py''. Odkazy sa berú zo všetkých stiahnutých stránok, do front idú iba profily hráčov, tímy a súťaže.
+
+<code python>
+RE_PLAYER = re.compile(r"^/people/[^/]+/\d+$")
+RE_TEAM = re.compile(r"^/[a-z-]+(?:/[a-z-]+)?/teams/[^/]+/\d+$")
+RE_COMP = re.compile(r"^/[a-z-]+/[a-z-]+/competitions/[^/]+$")
+RE_HREF = re.compile(r'href="(/[^"#?]*)"')
+FORBIDDEN = ("/api/", "/cms", "/healthz", "/ops")
+
+
+def kind(path):
+    if RE_PLAYER.match(path):
+        return "player"
+    if RE_TEAM.match(path):
+        return "team"
+    if RE_COMP.match(path):
+        return "comp"
+    return None
+
+
+class Crawler:
+    def add(self, path):
+        path = path.rstrip("/")
+        if path in self.seen or path.startswith(FORBIDDEN):
+            return
+        k = kind(path)
+        if k:
+            self.seen.add(path)
+            self.queues[k].append(path)
+
+    # v hlavnej slucke po stiahnuti stranky (status 200):
+    #     for href in RE_HREF.findall(html):
+    #         self.add(href)
+</code>
+
+===== 9. Extrakcia entít z HTML =====
+
+Súbor ''extractor.py''.
+
+  * **Základné údaje:** z JSON-LD bloku ''Person'' v hlavičke stránky.
+  * **Výška a noha:** z hlavičky profilu (v JSON-LD nie sú).
+
+<code python>
+RE_PERSON = re.compile(r'<script type="application/ld\+json">'
+                       r'(\{"@context":"https://schema.org","@type":"Person".*?)</script>')
+JSON_STR = r'"((?:[^"\\]|\\.)*)"'                # JSON retazec vratane escape (\" \n \u00e9)
+RE_LD_NAME = re.compile(r'"name":' + JSON_STR)  # prve "name" v bloku = meno hraca
+RE_LD_URL = re.compile(r'"url":' + JSON_STR)
+RE_LD_BIRTH = re.compile(r'"birthDate":"(\d{4}-\d{2}-\d{2})"')
+RE_LD_NATION = re.compile(r'"nationality":' + JSON_STR)
+RE_LD_CLUB = re.compile(r'"memberOf":\{[^}]*"name":' + JSON_STR)
+RE_LD_POSITION = re.compile(r'"jobTitle":' + JSON_STR)
+
+RE_HERO_META = re.compile(r'class="page-hero__meta">(.*?)</div>', re.S)
+RE_HEIGHT = re.compile(r">(\d{3}) cm<")
+RE_FOOT = re.compile(r">(Left|Right|Both)-footed<")
+
+
+def extract_person(page):
+    """Udaje z JSON-LD bloku a hlavicky stranky."""
+    ld = find(RE_PERSON, page)
+    meta = find(RE_HERO_META, page)
+    return {"name": find_json(RE_LD_NAME, ld),
+            "position": find_json(RE_LD_POSITION, ld),
+            "club": find_json(RE_LD_CLUB, ld),
+            "nationality": find_json(RE_LD_NATION, ld),
+            "birth_date": find(RE_LD_BIRTH, ld),
+            "height_cm": find(RE_HEIGHT, meta),
+            "foot": find(RE_FOOT, meta),
+            "url": find_json(RE_LD_URL, ld)}
+</code>
+
+  * **Tabuľky kariéry:** nájdu sa podľa ID panelu, stĺpce sa mapujú podľa hlavičky (tabuľky klubu a reprezentácie majú rôzne stĺpce).
+
+<code python>
+RE_PANEL = re.compile(r'id="career-(club|national)-(team|detailed)-panel"(.*?)</table>', re.S)
+RE_TH = re.compile(r"(<th[^>]*>.*?</th>)", re.S)
+RE_TBODY = re.compile(r"<tbody[^>]*>(.*?)</tbody>", re.S)
+RE_TR = re.compile(r"<tr[^>]*>(.*?)</tr>", re.S)
+RE_TD = re.compile(r"<td[^>]*>(.*?)</td>", re.S)
+
+
+def extract_detailed(table, section):
+    """Riadky podrobnej tabulky (sezona x tim x sutaz); stlpce sa mapuju podla hlavicky."""
+    headers = [DETAILED_HEADERS.get(header_name(th)) for th in RE_TH.findall(table)]
+    rows = []
+    for tr in RE_TR.findall(find(RE_TBODY, table)):
+        row = {"section": section}
+        for col, td in zip(headers, RE_TD.findall(tr)):
+            if col:
+                row[col] = cell_text(td)
+        for col in GROUP_COLS:                # rovnaka hodnota ako riadok vyssie -> stranka ju nevypise
+            if not row.get(col) and rows:
+                row[col] = rows[-1].get(col, "")
+        rows.append(row)
+    return rows
+</code>
+
+  * **Bio:** odstavce ''%%<p>%%'' v bloku ''%%id="player-bio-copy"%%'', bez tagov a HTML entít.
+  * **Chýbajúce hodnoty** (z 3287 hráčov):
+
+^ Pole ^ Chýba ^ Dôvod ^
+| birth_date | 1 | stránka ho neuvádza |
+| height_cm | 93 | stránka ho neuvádza |
+| foot | 193 | stránka ho neuvádza |
+| club_apps/goals/assists | 8 | prázdna tabuľka klubov |
+| national_team, nat_* | 926-927 | hráč nemá reprezentáciu |
+
+===== 10. Indexer a index (TF) =====
+
+Súbory ''indexer.py'' a ''tokenizer.py''.
+
+  * **Dokument = 1 hráč:** ''name, position, club, nationality, national_team, foot, bio'' a názvy tímov a súťaží z ''career.tsv''. Každý názov sa berie raz, aby hráč s 15 sezónami v jednom klube nemal 15-krát vyššiu TF.
+  * **Tokenizer:**
+    * malé písmená, bez diakritiky (Müller na muller, Brøndby na brondby),
+    * tokeny ''%%[a-z0-9]+%%'' s dĺžkou aspoň 2 znaky,
+    * vlastný zoznam anglických stop slov,
+    * dopyt prechádza rovnakým tokenizerom.
+  * **index.tsv:** ''term'', ''df'' a postings ''doc_id:tf''.
+  * **docs.tsv:** ''doc_id, name, length'' (počet termov dokumentu).
+  * **Ako často sa vytvára:** celý naraz (batch) po každej extrakcii, teda po novom crawle (''%%py main.py all%%''). Nie je inkrementálny. Vyhľadávanie ho pri štarte načíta raz a predpočíta idf a normy dokumentov pre každú metódu.
+  * **Skóre:** kosínusová podobnosť TF-IDF vektorov, váha výskytu ''1 + log(tf)''. Filtre pred výpočtom obmedzia množinu hráčov.
+
+<code>
+term     df   postings
+penalty  39   42:1 46:1 442:1 452:1 460:1 621:1 737:1 ...
+saves    1    46:1
+</code>
+
+^ Index ^ Hodnota ^
+| dokumenty (hráči) | 3287 |
+| unikátne termy | 13042 |
+| záznamy (term, dokument) | 289326 |
+| termy iba v 1 dokumente (df = 1) | 7590 |
+| priemerná dĺžka dokumentu | 130.6 termov |
+
+===== 11. Metódy výpočtu idf =====
+
+N = počet dokumentov (3287), df = počet dokumentov s termom. Súbor ''search.py'', voľba ''%%--idf classic|smooth|prob%%''.
+
+^ Metóda ^ Vzorec ^ Vlastnosť ^
+| classic | log(N / df) | term vo všetkých dokumentoch má váhu 0 |
+| smooth | log((N + 1) / (df + 1)) + 1 | žiadny term nemá váhu 0, časté termy stále trochu prispievajú |
+| prob | max(0, log((N - df) / df)) | pravdepodobnostné idf (Manning, Introduction to IR), term aspoň v polovici dokumentov má váhu 0 |
+
+===== 12. Porovnanie idf metód =====
+
+Príkaz ''%%py main.py compare%%''. Tabuľky: idf termov dopytu a top 5 výsledkov so skóre.
+
+==== Dopyt 1: "spanish defender premier league" ====
+
+^ term ^ df ^ classic ^ smooth ^ prob ^
+| spanish | 132 | 3.215 | 4.208 | 3.174 |
+| defender | 1110 | 1.086 | 2.085 | 0.674 |
+| premier | 1069 | 1.123 | 2.123 | 0.730 |
+| league | 2857 | 0.140 | 1.140 | 0.000 |
+
+^ # ^ classic ^ smooth ^ prob ^
+| 1 | James Wright (0.144) | James Wright (0.187) | James Wright (0.131) |
+| 2 | John Donald (0.126) | Yago Santiago (0.143) | John Donald (0.123) |
+| 3 | Nacho Pérez (0.119) | John Donald (0.139) | Nacho Pérez (0.116) |
+| 4 | Javi Rodríguez (0.119) | Iñaki Rupérez (0.134) | Javi Rodríguez (0.116) |
+| 5 | Yago Santiago (0.119) | Javi Rodríguez (0.133) | Buba Sangaré (0.115) |
+
+  * **Prekryv top 5:** classic-smooth 4/5, classic-prob 4/5, smooth-prob 3/5.
+  * "league" je v 87 % dokumentov: prob ho ignoruje (0), smooth mu dá 1.14, preto sú tu rozdiely najväčšie.
+
+==== Dopyt 2: "young striker ajax academy" ====
+
+^ term ^ df ^ classic ^ smooth ^ prob ^
+| young | 107 | 3.425 | 4.416 | 3.392 |
+| striker | 119 | 3.319 | 4.311 | 3.282 |
+| ajax | 157 | 3.041 | 4.035 | 2.993 |
+| academy | 1485 | 0.795 | 1.794 | 0.193 |
+
+^ # ^ classic ^ smooth ^ prob ^
+| 1 | Aaron Bouwman (0.226) | Aaron Bouwman (0.242) | Aaron Bouwman (0.227) |
+| 2 | Ryan Gravenberch (0.196) | Brian Brobbey (0.202) | Ryan Gravenberch (0.200) |
+| 3 | Brian Brobbey (0.194) | Ryan Gravenberch (0.198) | Brian Brobbey (0.195) |
+| 4 | Sean Steur (0.170) | Sean Steur (0.186) | Sean Steur (0.169) |
+| 5 | Dies Janse (0.167) | Dies Janse (0.178) | Dies Janse (0.167) |
+
+  * **Prekryv top 5:** 5/5 pri všetkých dvojiciach.
+  * Pri smooth sa vymení 2. a 3. miesto, lebo "academy" (45 % dokumentov) má väčšiu váhu.
+
+==== Dopyt 3: "goalkeeper penalty saves" ====
+
+^ term ^ df ^ classic ^ smooth ^ prob ^
+| goalkeeper | 371 | 2.182 | 3.179 | 2.062 |
+| penalty | 39 | 4.434 | 5.409 | 4.422 |
+| saves | 1 | 8.098 | 8.405 | 8.097 |
+
+^ # ^ classic ^ smooth ^ prob ^
+| 1 | Rome-Jayden Owusu-Oduro (0.243) | Rome-Jayden Owusu-Oduro (0.225) | Rome-Jayden Owusu-Oduro (0.246) |
+| 2 | Mile Svilar (0.092) | Mile Svilar (0.117) | Mile Svilar (0.090) |
+| 3 | Florian Müller (0.084) | Florian Müller (0.104) | Florian Müller (0.083) |
+| 4 | Sander Tangvik (0.081) | Sander Tangvik (0.101) | Sander Tangvik (0.080) |
+| 5 | Nick Olij (0.072) | Nick Olij (0.087) | Nick Olij (0.071) |
+
+  * **Prekryv top 5:** 5/5 pri všetkých dvojiciach.
+  * Všetky termy sú zriedkavé ("saves" je iba v 1 dokumente), takže metódy dávajú rovnaké poradie.
+
+**Záver:**
+  * metódy sa líšia hlavne pri častých termoch (df blízko N/2 a viac),
+  * prob časté termy vypne úplne,
+  * smooth ich nechá prispievať a viac uprednostní dokumenty so všetkými slovami dopytu,
+  * classic je medzi nimi.
+
+===== 13. Štatistika =====
+
+^ Crawl ^ Hodnota ^
+| requesty spolu | 19763 |
+| unikátne URL | 19729 |
+| requesty: hráči / tímy / súťaže | 18981 / 690 / 92 |
+| status 200 / 403 / 500 / timeout | 19691 / 35 / 21 / 16 |
+| stiahnuté dáta | 8.25 GB |
+| priemerný čas odpovede | 1.20 s |
+| obdobie crawlu | 2026-10-11 až 2026-10-26 |
+| úspešne stiahnuté profily (/people/) | 18911 |
+| relevantní hráči (bio aj štatistiky, uložené) | 3287 (17.4 %) |
+| neuložené profily (tréneri, personál, bez bio alebo štatistík) | 15624 |
+
+^ Disk ^ Hodnota ^
+| HTML stránky hráčov | 3287 súborov, 1.48 GB |
+| priemerná veľkosť HTML | 472.9 kB |
+| players.tsv | 2.7 MB (3287 riadkov) |
+| career.tsv | 6.0 MB (93920 riadkov) |
+| index.tsv | 2.2 MB |
+| docs.tsv | 77.6 kB |
+| crawl_log.tsv | 1.3 MB |
+
+===== 14. ZIP s kódom =====
+
+{{:user:marek.penzes:vinf_kod.zip|ZIP s kódom}}
+
+^ Súbor ^ Na čo ^
+| ''main.py'' | spoločný vstup (crawl, extract, index, search, compare, stats, test, all) |
+| ''config.py'' | cesty k súborom |
+| ''crawler.py'' | crawler |
+| ''extractor.py'' | regex extraktor |
+| ''tokenizer.py'' | tokenizer (spoločný pre index aj dopyt) |
+| ''indexer.py'' | invertovaný index |
+| ''search.py'' | vyhľadávanie, idf metódy |
+| ''filters.py'' | filtre nad stĺpcami players.tsv |
+| ''compare.py'' | porovnanie idf metód |
+| ''stats.py'' | štatistiky a tokeny |
+| ''tsv.py'' | čítanie a zápis TSV |
+| ''tests/test_extractor.py'' | unit testy |
+| ''requirements.txt'' | externé knižnice (''%%py -m pip install -r requirements.txt%%'') |
+
+===== 15. BONUS: Unit testy extraktora =====
+
+Súbor ''tests/test_extractor.py'', spustenie ''%%py main.py test%%''. Výsledok: **28 testov, všetky OK**.
+
+  * **20 uložených stránok hráčov:** každá je samostatný test, kontroluje všetky polia ''players.tsv'', počet riadkov ''career.tsv'' a začiatok bio. Očakávané hodnoty sú ručne skontrolované v uložených HTML.
+  * **Okrajové prípady:** chýbajúca výška, noha, dátum narodenia alebo reprezentácia, diakritika a apostrof v mene, mládežnícka reprezentácia pred A-tímom, najdlhšia kariéra, hráč s jediným riadkom kariéry.
+  * **8 testov pomocných funkcií:** prázdne hodnoty v bunke, plný názov z ''title'', HTML entity, JSON escape, mapovanie stĺpcov podľa hlavičky, výber hlavného tímu reprezentácie.
+
+===== 16. BONUS: Počet tokenov =====
+
+Príkaz ''%%py main.py stats --html%%'', knižnica ''tiktoken'', kódovania ''cl100k_base'' (GPT-4) a ''o200k_base'' (GPT-4o).
+
+^ Dáta ^ cl100k_base ^ o200k_base ^
+| HTML stránky (3287) | 469 142 461 | 472 808 594 |
+| players.tsv | 791 106 | 772 212 |
+| career.tsv | 3 522 158 | 3 485 614 |
+| bio (text životopisov) | 606 577 | 588 022 |
+
+Extrahované dáta (players.tsv a career.tsv) majú približne 0.9 % tokenov surového HTML.
