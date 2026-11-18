@@ -5,6 +5,7 @@ import html
 import json
 import os
 import re
+import time
 
 from config import CAREER_FILE, HTML_DIR, PLAYERS_FILE
 from tsv import RE_SPACE, tsv_header, tsv_line
@@ -197,29 +198,40 @@ def player_files():
     return sorted(files)
 
 
-def run(limit=None):
-    files = player_files()[:limit]
+def extract_file(pid, path):
+    with open(path, encoding="utf-8", errors="replace") as f:
+        return extract_player(f.read(), pid)
+
+
+def save(results):
+    """(hrac, riadky kariery) zoradene podla id -> players.tsv, career.tsv; vypise suhrn.
+    Pouziva ho aj Spark verzia (spark_extract.py), aby bol vystup rovnaky."""
     missing = {c: 0 for c in PLAYER_COLS}           # kolko hracov nema dane pole (do statistiky)
-    n_rows = 0
+    n_players = n_rows = 0
     with open(PLAYERS_FILE, "w", encoding="utf-8", newline="") as fp, \
             open(CAREER_FILE, "w", encoding="utf-8", newline="") as fc:
         fp.write(tsv_header(PLAYER_COLS))
         fc.write(tsv_header(CAREER_COLS))
-        for i, (pid, path) in enumerate(files, 1):
-            with open(path, encoding="utf-8", errors="replace") as f:
-                player, rows = extract_player(f.read(), pid)
+        for player, rows in results:
             fp.write(tsv_line(player, PLAYER_COLS))
             for row in rows:
                 fc.write(tsv_line(row, CAREER_COLS))
+            n_players += 1
             n_rows += len(rows)
             for c in PLAYER_COLS:
                 if not player.get(c):
                     missing[c] += 1
-            if i % 500 == 0:
-                print(f"  {i}/{len(files)} hracov")
-    print(f"Hotovo: {len(files)} hracov -> {PLAYERS_FILE}, {n_rows} riadkov kariery -> {CAREER_FILE}")
+            if n_players % 2000 == 0:
+                print(f"  {n_players} hracov")
+    print(f"Hotovo: {n_players} hracov -> {PLAYERS_FILE}, {n_rows} riadkov kariery -> {CAREER_FILE}")
     print("Chybajuce polia (pocet hracov):",
           ", ".join(f"{c}={n}" for c, n in missing.items() if n) or "ziadne")
+
+
+def run(limit=None):
+    start = time.time()
+    save(extract_file(pid, path) for pid, path in player_files()[:limit])
+    print(f"Cas: {time.time() - start:.0f} s")
 
 
 def main(argv=None):

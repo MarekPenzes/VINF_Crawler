@@ -1,16 +1,18 @@
 """Spolocny vstup projektu: py main.py <prikaz> [argumenty prikazu]
-
 Prikazy:
-  crawl     stiahne stranky hracov do data/html      py main.py crawl --target 6000
-  extract   regex extrakcia -> players.tsv, career.tsv
-  index     invertovany index -> index.tsv, docs.tsv
-  search    vyhladavanie z prikazoveho riadku        py main.py search "left footed winger" age<23 --idf prob
-  compare   porovnanie idf metod na dopytoch         py main.py compare
-  stats     statistiky a tokeny (tiktoken)           py main.py stats --html
-  test      unit testy extraktora                    py main.py test -v
-  all       extract, index a test po sebe (bez crawlu a statistik)
-
+  crawl          stiahne stranky hracov do data/html      py main.py crawl --target 6000
+  extract        regex extrakcia -> players.tsv, career.tsv
+  spark-extract  ta ista extrakcia cez Spark              py main.py spark-extract --limit 1000
+  index          invertovany index -> index.tsv, docs.tsv
+  search         vyhladavanie z prikazoveho riadku        py main.py search "left footed winger" age<23 --idf prob
+  compare        porovnanie idf metod na dopytoch         py main.py compare
+  wiki           Spark: wiki dump -> wiki_players.tsv     py main.py wiki --parse-only
+  join           Spark: players.tsv x wiki -> joined.tsv  py main.py join
+  stats          statistiky a tokeny (tiktoken)           py main.py stats --html
+  test           unit testy extraktora a wiki parsera     py main.py test -v
+  all            extract, index a test po sebe (bez crawlu, wiki a statistik)
 Argumenty za prikazom dostane priamo dany modul, napr. py main.py search --help."""
+
 import importlib
 import os
 import sys
@@ -20,9 +22,10 @@ from config import BASE_DIR
 
 TESTS_DIR = os.path.join(BASE_DIR, "tests")
 # prikaz -> modul s funkciou main(argv); importuje sa az pri pouziti, aby napr. vyhladavanie
-# nepotrebovalo curl_cffi (crawler) ani tiktoken (statistiky)
-COMMANDS = {"crawl": "crawler", "extract": "extractor", "index": "indexer",
-            "search": "search", "compare": "compare", "stats": "stats"}
+# nepotrebovalo curl_cffi (crawler), tiktoken (statistiky) ani pyspark (Spark joby)
+COMMANDS = {"crawl": "crawler", "extract": "extractor", "spark-extract": "spark_extract",
+            "index": "indexer", "search": "search", "compare": "compare",
+            "wiki": "wiki_extract", "join": "wiki_join", "stats": "stats"}
 PIPELINE = ["extract", "index", "test"]   # prikaz all
 
 

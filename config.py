@@ -19,3 +19,10 @@ DOCS_FILE = os.path.join(DATA_DIR, "docs.tsv")
 
 # vystup statistik
 STATS_FILE = os.path.join(DATA_DIR, "stats.tsv")
+
+# wiki dump a vystupy Spark jobov
+WIKI_DIR = os.path.join(DATA_DIR, "wiki")
+WIKI_DUMP = os.path.join(WIKI_DIR, "enwiki-latest-pages-articles.xml.bz2")
+WIKI_PAGES_DIR = os.path.join(WIKI_DIR, "football")   # stranky futbalistov vyfiltrovane z dumpu
+WIKI_FILE = os.path.join(DATA_DIR, "wiki_players.tsv")
+JOIN_FILE = os.path.join(DATA_DIR, "joined.tsv")

@@ -1,18 +1,21 @@
 """Statistiky projektu: crawl (z crawl_log.tsv), velkost dat na disku, extrahovane data,
-index a pocet tokenov podla tiktoken (bonus). Vysledok sa vypise a ulozi do data/stats.tsv.
+index, wiki a join a pocet tokenov podla tiktoken (bonus). Vysledok sa vypise a ulozi do
+data/stats.tsv.
 
 Pouzitie: py stats.py           (tokeny extrahovanych dat)
           py stats.py --html    (aj tokeny vsetkych HTML stranok, trva niekolko minut)"""
 import argparse
+import glob
 import os
 from collections import Counter
 from datetime import datetime
 
 import tiktoken
 
-from config import (CAREER_FILE, CRAWL_LOG_FILE, DOCS_FILE, HTML_DIR, INDEX_FILE,
-                    PLAYERS_FILE, STATS_FILE)
+from config import (CAREER_FILE, CRAWL_LOG_FILE, DOCS_FILE, HTML_DIR, INDEX_FILE, JOIN_FILE,
+                    PLAYERS_FILE, STATS_FILE, WIKI_DUMP, WIKI_FILE, WIKI_PAGES_DIR)
 from tsv import read_tsv, tsv_header, tsv_line
+from wikitext import WIKI_COLS
 
 ENCODINGS = ["cl100k_base", "o200k_base"]   # tokenizery modelov GPT-4 a GPT-4o
 HTML_BATCH = 100                             # kolko HTML stranok sa tokenizuje naraz
@@ -108,6 +111,47 @@ def index_stats():
     ]
 
 
+def wiki_stats():
+    """Wiki dump, stranky futbalistov (wiki_players.tsv) a join s nasimi hracmi (joined.tsv)."""
+    if not (os.path.exists(WIKI_FILE) and os.path.exists(JOIN_FILE)):
+        return [("wiki_players.tsv alebo joined.tsv chyba", "spusti py main.py wiki a py main.py join")]
+    wiki = list(read_tsv(WIKI_FILE))
+    joined = list(read_tsv(JOIN_FILE))
+    players = {player["id"]: player for player in read_tsv(PLAYERS_FILE)}
+    with_date = sum(1 for player in players.values() if player["birth_date"])
+    pages = glob.glob(os.path.join(WIKI_PAGES_DIR, "part-*.xml"))
+
+    def filled(rows, col):
+        return sum(1 for row in rows if row[col])
+
+    def gained(col):
+        """Pripojeni hraci, ktori pole col u nas nemaju a z wiki ho dostanu."""
+        return sum(1 for row in joined if row[f"wiki_{col}"] and not players[row["player_id"]][col])
+
+    stats = []
+    if os.path.exists(WIKI_DUMP):
+        stats.append(("velkost wiki dumpu (bz2)", size_text(os.path.getsize(WIKI_DUMP))))
+    stats += [
+        ("vyfiltrovane stranky futbalistov (XML)", size_text(sum(os.path.getsize(path) for path in pages))),
+        ("velkost wiki_players.tsv", size_text(os.path.getsize(WIKI_FILE))),
+        ("velkost joined.tsv", size_text(os.path.getsize(JOIN_FILE))),
+        ("stranky futbalistov z wiki", len(wiki)),
+        ("pripojeni hraci", len(joined)),
+        ("podiel z hracov s datumom narodenia", percent(len(joined), with_date)),
+        ("unikatne pripojene wiki stranky", len({row["wiki_id"] for row in joined})),
+        ("presna zhoda mena (skore 1)", sum(1 for row in joined if float(row["match_score"]) == 1)),
+        ("pripojeni bez bio, text z wiki (abstract)", sum(
+            1 for row in joined if row["wiki_abstract"] and not players[row["player_id"]]["bio"])),
+        ("pripojeni bez vysky, vyska z wiki", gained("height_cm")),
+    ]
+    # polia, ktore worldfootball nema vobec
+    stats += [(f"pripojeni s {col} z wiki", filled(joined, f"wiki_{col}"))
+              for col in ["full_name", "birth_place", "youth_clubs", "categories"]]
+    stats += [(f"wiki: vyplnene pole {col}", percent(filled(wiki, col), len(wiki)))
+              for col in WIKI_COLS if col not in ("id", "title", "url")]
+    return stats
+
+
 def count_tokens(encoding, texts):
     # encode_ordinary: text "<|endoftext|>" v HTML sa berie ako obycajny text, nie specialny token
     return sum(len(tokens) for tokens in encoding.encode_ordinary_batch(texts))
@@ -167,6 +211,7 @@ def main(argv=None):
         "disk": disk_stats,
         "data": data_stats,
         "index": index_stats,
+        "wiki": wiki_stats,
         "tokeny": lambda: token_stats(args.html),
     }
     rows = [(section, metric, value) for section, collect in sections.items() for metric, value in collect()]

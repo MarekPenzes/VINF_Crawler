@@ -1,2 +1,4 @@
 curl_cffi==0.16.3
 tiktoken==0.14.0
+# Spark joby (spark_extract, wiki_extract, wiki_join); potrebuje Javu 17 alebo 21
+pyspark==4.0.5

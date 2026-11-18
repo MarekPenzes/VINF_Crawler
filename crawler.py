@@ -35,13 +35,13 @@ RE_BLOCK = re.compile(r"Just a moment|cf-chl|Attention Required")
 # statusy v logu, ktore sa na konci skusia znova (CF = challenge stranka so statusom 200)
 RETRY_STATUS = re.compile(r"^(CF|None|403|429|5\d\d)$")
 FORBIDDEN = ("/api/", "/cms", "/healthz", "/ops")
-# ukladame iba hracov s bio a tabulkou statistik (nie trenerov, personal ...)
-RE_BIO = re.compile(r'class="player-bio[^"]*"[^>]*>\s*<p>\s*[^<\s]')
+# ukladame iba hracov s tabulkou statistik (nie trenerov, personal ...); bio nie je podmienka,
+# hracom bez bio sa text doplni z wiki
 RE_STATS = re.compile(r'class="[^"]*player-career-table')
 
 
 def is_player(html):
-    return bool(RE_BIO.search(html) and RE_STATS.search(html))
+    return bool(RE_STATS.search(html))
 
 
 def kind(path):
@@ -52,6 +52,12 @@ def kind(path):
     if RE_COMP.match(path):
         return "comp"
     return None
+
+
+def html_file(path):
+    """/people/{slug}/{id} -> data/html/{id}_{slug}.html"""
+    _, slug, pid = path.split("/")[1:]
+    return os.path.join(HTML_DIR, f"{pid}_{slug}.html")
 
 
 def hms(sec):
@@ -211,11 +217,10 @@ class Crawler:
                     for href in RE_HREF.findall(html):
                         self.add(href)
                     if k == "player" and not is_player(html):
-                        k = "skip"             # bez bio alebo statistik -> neukladam
+                        k = "skip"             # bez statistik -> neukladam
                         skipped += 1
                     elif k == "player":
-                        _, slug, pid = path.split("/")[1:]
-                        with open(os.path.join(HTML_DIR, f"{pid}_{slug}.html"), "w", encoding="utf-8") as f:
+                        with open(html_file(path), "w", encoding="utf-8") as f:
                             f.write(html)
                         self.saved += 1
                         self.bytes += size

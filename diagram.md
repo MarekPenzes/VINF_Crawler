@@ -1,14 +1,17 @@
-# Diagram architektúry crawlera
+# Diagram architektúry
 
-Architektúra je inšpirovaná článkom
+- **1-2: crawler** (fáza 1)
+- **3-4: Spark, wiki dump a join** (fáza 3)
+
+Architektúra crawlera je inšpirovaná článkom
 [HelloInterview - Web Crawler](https://www.hellointerview.com/learn/system-design/problem-breakdowns/web-crawler).
 Je zmenšená na jeden proces a jednu doménu (worldfootball.com).
 
 **Rozhranie systému:**
 - **Vstup:** seed URL (hráč, tím a 5 líg).
-- **Výstup:** HTML stránky hráčov s bio a tabuľkou štatistík v `data/html/`.
+- **Výstup:** HTML stránky hráčov s tabuľkou štatistík v `data/html/` (bio nie je podmienka, text doplní wiki).
 
-## 1. Architektúra
+## 1. Architektúra crawlera
 
 ```mermaid
 flowchart LR
@@ -17,7 +20,7 @@ flowchart LR
     FETCHER["URL Fetcher (curl_cffi ako Chrome)<br/>sleep 2-3 s, timeout 20 s<br/>blok → retry na konci"]
     WEB[("worldfootball.com")]
     PARSER["Parser (regex)<br/>odkazy + dedup"]
-    FILTER{"hráč s bio<br/>a štatistikami?"}
+    FILTER{"hráč s tabuľkou<br/>štatistík?"}
     HTML[("data/html/<br/>stránky hráčov")]
     STATE[("state.json<br/>stav crawlu")]
 
@@ -41,7 +44,7 @@ flowchart TD
     D -- "200 OK" --> H["vytiahni všetky odkazy<br/>pridaj nové do front"]
     H --> I{"typ stránky?"}
     I -- "tím / liga" --> K["iba zdroj odkazov<br/>neukladá sa"]
-    I -- "hráč" --> J{"má bio AND<br/>tabuľku štatistík?"}
+    I -- "hráč" --> J{"má tabuľku<br/>štatistík?"}
     J -- "áno" --> L["uložiť data/html/id_slug.html<br/>saved++"]
     J -- "nie" --> M["preskočiť<br/>skipped++"]
     L --> N{"saved >= target?"}
@@ -50,4 +53,50 @@ flowchart TD
     F --> N
     N -- "nie" --> O["každých 10 stránok ulož state.json<br/>sleep 2-3 s"] --> A
     N -- "áno" --> P["koniec, ulož state.json"]
+```
+
+## 3. Spark pipeline
+
+Spark beží lokálne (`local[*]`, 8 vlákien). Nadpis bloku je príkaz a súbor s kódom.
+
+```mermaid
+flowchart TD
+    subgraph EX["py main.py spark-extract (spark_extract.py)"]
+        direction LR
+        HTML[("data/html/<br/>18 823 HTML")] --> EXT["regex extraktor<br/>16 partícií"] --> PT[("players.tsv<br/>career.tsv")]
+    end
+
+    subgraph WK["py main.py wiki (wiki_extract.py, parser wikitext.py)"]
+        DUMP[("enwiki dump<br/>24 GB bz2")] --> READ["čítanie po stránkach<br/>bz2 bloky paralelne"]
+        READ --> JVM{"filter v JVM:<br/>článok (ns 0) s infoboxom<br/>football biography?"}
+        JVM -- "nie" --> DROP["zahodiť"]
+        JVM -- "áno" --> PARTS[("data/wiki/football/<br/>215 561 stránok, 1,8 GB")]
+        PARTS --> PARSE["regex parser<br/>infobox, dátum, výška, kariéra,<br/>úvodný text, kategórie"]
+        PARSE --> DEDUP["duplicity podľa id stránky<br/>reduceByKey"] --> WT[("wiki_players.tsv<br/>215 561 hráčov")]
+    end
+
+    subgraph JN["py main.py join (wiki_join.py)"]
+        JOIN["join na dátume narodenia<br/>+ porovnanie mien"] --> JT[("joined.tsv<br/>12 477 hráčov<br/>12 472 wiki stránok")]
+    end
+
+    PT --> JOIN
+    WT --> JOIN
+```
+
+## 4. Join hráčov s wiki
+
+worldfootball nemá odkaz na Wikipédiu, samotné meno nestačí (menovci, mononymy, iný prepis).
+Kľúčom je dátum narodenia a na dvojiciach s rovnakým dátumom sa porovnajú mená.
+
+```mermaid
+flowchart TD
+    P[("players.tsv<br/>18 593 s dátumom narodenia")] --> EQ
+    W[("wiki_players.tsv<br/>208 206 s dátumom narodenia")] --> EQ
+    EQ["equi-join na birth_date<br/>(Spark SQL)"] --> S["name_score (Python UDF)<br/>tokeny bez diakritiky a častíc<br/>presne alebo podobný prepis (difflib)"]
+    S --> C{"sedia aspoň 2 tokeny?<br/>(mononym: presne)"}
+    C -- "nie" --> X["iná osoba<br/>Paul Martin / John Martin"]
+    C -- "áno" --> PAIRS["12 501 dvojíc<br/>skóre = priemerná podobnosť"]
+    PAIRS --> B1["pre hráča najvyššie skóre<br/>remíza = vynechať"]
+    B1 --> B2["pre stránku najvyššie skóre<br/>remíza = vynechať,<br/>okrem skóre 1 (duplicitný profil)"]
+    B2 --> J[("joined.tsv<br/>12 477 hráčov, 12 472 stránok")]
 ```
