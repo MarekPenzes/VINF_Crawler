@@ -1,0 +1,169 @@
+====== Konzultácia 4: Lucene index ======
+
+===== 1. Prehľad =====
+
+  * **Cieľ:** nový index hráčov v PyLucene nad dátami z worldfootball.com aj z wiki, zapojený do vyhľadávania a porovnaný so starým TF-IDF indexom.
+  * **Spark kód** z 3. fázy je dokončený (''spark-extract'', ''wiki'', ''join''). Jeho výstup ''joined.tsv'' je jedným zo vstupov Lucene indexu.
+  * **Prostredie:** PyLucene 10.0.0 (Lucene 10.0.0).
+    * PyLucene nemá balík pre pip ani pre Windows: Java Lucene sa obaľuje nástrojom JCC a kompiluje v C++.
+    * Preto beží v Docker image ''coady/pylucene:10.0.0''. Skript ''lucene.cmd'' pripojí priečinok projektu do kontajnera, dáta aj index ostávajú na disku v ''data/''.
+
+^ Súbor ^ Úloha ^
+| lucene_index.py | návrh polí, analyzéry, stavba indexu -> data/lucene/ |
+| lucene_search.py | dopyt -> Lucene Query (text + filtre), vyhľadávanie (BM25) |
+| lucene_server.py | HTTP server, JVM a index sa otvoria raz |
+| search.py | pôvodné vyhľadávanie, nový prepínač ''%%--index lucene%%'' |
+| lucene_compare.py | porovnanie starého a nového indexu |
+| tests/test_lucene.py | 18 unit testov |
+
+<code>
+lucene.cmd lucene-index        (stavba indexu, 17 s)
+lucene.cmd lucene-serve        (server, nechat bezat v druhom terminali)
+py main.py search goalkeeper "height>=195" nationality=germany --index lucene
+lucene.cmd lucene-compare      (porovnanie stary vs novy index)
+lucene.cmd test
+</code>
+
+===== 2. Návrh indexu =====
+
+  * **Dokument = 1 hráč:** 18 823 dokumentov, z toho 12 477 s dátami z wiki, veľkosť 8,3 MB.
+  * **Vstupy:** ''players.tsv'' (profil), ''career.tsv'' (všetky kluby a súťaže z kariéry), ''joined.tsv'' (atribúty z wiki).
+  * **Analyzéry** (''CustomAnalyzer'' + ''PerFieldAnalyzerWrapper''):
+    * **NAME** pre vlastné mená (hráči, kluby, súťaže, miesta): ''StandardTokenizer'', ''LowerCase'', ''ASCIIFolding''. Bez stemmingu, aby sa názvy nemenili. Vďaka ASCIIFolding nájde ''modric'' aj Modrić.
+    * **TEXT** pre anglický text (bio, abstract, kategórie): navyše ''EnglishPossessive'', ''Stop'' a ''PorterStem'' (saves, saved -> save).
+    * Viac hodnôt jedného poľa (kluby, kategórie) má medzi sebou medzeru 100 pozícií (''positionIncrementGap''). Fráza "real madrid" tak nespojí koniec jedného klubu so začiatkom ďalšieho.
+  * **Skóre:** BM25 (predvolené v Lucene). Text dopytu sa hľadá vo všetkých textových poliach naraz (''MultiFieldQueryParser'') s váhami polí.
+  * Textové polia sa neukladajú (''Store.NO''). Výpis berie údaje z players.tsv, index je tak menší.
+
+==== Polia a zdôvodnenie ====
+
+^ Pole ^ Typ ^ Zdroj ^ Váha ^ Prečo ^
+| name | TextField, NAME | players.tsv | 3 | meno je najpresnejší identifikátor hráča |
+| full_name | TextField, NAME | wiki | 2 | celé meno (Rodri = Rodrigo Hernández Cascante) |
+| club | TextField, NAME | players.tsv | 1,5 | súčasný klub je dôležitejší ako bývalé |
+| teams | TextField, NAME, viac hodnôt | career.tsv | 1 | všetky kluby a reprezentácie z kariéry |
+| competitions | TextField, NAME, viac hodnôt | career.tsv | 1 | súťaže (Premier League, Champions League) |
+| nationality, national_team | TextField, NAME | players.tsv | 1 | krajina a reprezentácia v texte dopytu |
+| position, foot | TextField, NAME | players.tsv | 1 | pozícia a noha v texte dopytu (goalkeeper, left) |
+| birth_place | TextField, NAME | wiki | 1 | miesto narodenia, worldfootball ho nemá |
+| youth_clubs | TextField, NAME, viac hodnôt | wiki | 1 | mládežnícke kluby a akadémie (odchovanci Ajaxu), bez rokov a štatistík |
+| bio | TextField, TEXT | players.tsv | 1 | životopis z worldfootball, má ho iba 19,6 % hráčov |
+| abstract | TextField, TEXT | wiki | 1 | úvod článku, text aj pre 9 028 hráčov bez bio |
+| categories | TextField, TEXT, viac hodnôt | wiki | 0,5 | hotové skupiny hráčov, ale dlhé zoznamy, preto nižšia váha |
+| name_key, club_key, nationality_key, national_team_key, position_key, foot_key | StringField | players.tsv | - | celá hodnota bez analýzy (malé písmená, bez diakritiky) pre filtre =, != a ~ |
+| height_cm | IntPoint + StoredField | players.tsv, chýbajúca z wiki | - | range filter výšky, 341 hráčov má výšku z wiki |
+| club_apps, club_goals, club_assists, nat_apps, nat_goals, nat_assists | IntPoint + StoredField | players.tsv | - | range filtre na štatistiky |
+| birth_date | IntPoint + StoredField (YYYYMMDD) | players.tsv | - | filter veku: vek sa mení každý deň, preto index drží dátum a vek sa prevedie na rozsah dátumov až pri dopyte |
+| id | StringField, uložené | players.tsv | - | prepojenie výsledku s hráčom |
+| name_stored, wiki_url | StoredField | players.tsv, wiki | - | meno a odkaz na wiki do výpisu |
+| name_sort | SortedDocValuesField | players.tsv | - | zoradenie podľa mena, keď má dopyt iba filtre (bez skóre) |
+
+===== 3. Typy dopytov =====
+
+Text dopytu je v syntaxi Lucene ''QueryParser''. Filtre majú rovnaký tvar ako pri starom indexe (pole, operátor, hodnota) a prekladajú sa na Lucene dopyty. Celý dopyt je ''BooleanQuery'': text ako ''MUST'' (určuje skóre), filtre ako ''FILTER'' (obmedzia výsledky, skóre nemenia).
+
+^ Typ ^ Príklad ^ Lucene ^
+| Boolean OR | ''goalkeeper penalty saves'' | ''BooleanQuery'', ''SHOULD'' (predvolené) |
+| Boolean AND | ''%%+goalkeeper +penalty%%'' alebo ''goalkeeper AND penalty'' | ''MUST'' |
+| Boolean NOT | ''%%ballon -nationality:france%%'' | ''MUST_NOT'' |
+| Phrase | ''%%"real madrid"%%'' | ''PhraseQuery'' |
+| Fuzzy | ''%%modrc~%%'' | ''FuzzyQuery'', najviac 2 zmeny znakov |
+| Hľadanie v poli | ''%%birth_place:zagreb%%'', ''%%youth_clubs:ajax%%'' | dopyt iba v jednom poli |
+| Range | ''%%height>=195%%'', ''%%nat_goals>=60%%'', ''%%age<23%%'' | ''IntPoint.newRangeQuery'' |
+| Term (filter) | ''nationality=germany'' | ''TermQuery'' na ''nationality_key'' |
+| Wildcard (filter) | ''%%club~madrid%%'' | ''WildcardQuery'' ''%%*madrid*%%'' |
+| Negácia filtra | ''%%nationality!=spain%%'' | pole existuje (''PrefixQuery'') a ''MUST_NOT'' hodnota |
+
+  * **Vek:** k 19. 11. 2026 sa ''%%age<23%%'' prevedie na "narodený 20. 11. 2003 alebo neskôr" a hľadá sa rozsah na ''birth_date''. Prevod je otestovaný deň po dni proti výpočtu veku, aj pre 29. február.
+
+===== 4. Zapojenie do aplikácie =====
+
+  * Vyhľadávanie má rovnaký príkaz ako pri starom indexe, iba s ''%%--index lucene%%''. Filtre aj výpis sú rovnaké, text navyše podporuje syntax Lucene.
+  * Štart JVM a otvorenie indexu trvá cca 2 s, s Dockerom 5 až 10 s. Preto ''lucene_server.py'' otvorí index raz a ''search.py'' mu posiela dopyty cez HTTP (iba na 127.0.0.1). V kontajneri s PyLucene hľadá ''search.py'' priamo v indexe.
+  * Lucene vráti iba top k výsledkov, celkový počet zistí ''IndexSearcher.count'' bez čítania dokumentov.
+
+<code>
+> py main.py search goalkeeper "height>=195" nationality=germany --index lucene
+Dopyt: "goalkeeper" | filtre: height>=195 nationality=germany | index: lucene (BM25)
+Najdenych hracov: 15
+  1. 4.4722  Lars Unnerstall (Goalkeeper, FC Twente, Germany, 36 r.)
+  2. 4.2884  Silas Ostrzinski (Goalkeeper, Borussia Dortmund, Germany, 23 r.)
+  3. 3.9656  Alexander Meyer (Goalkeeper, Borussia Dortmund, Germany, 35 r.)
+</code>
+
+===== 5. Porovnanie starého a nového indexu =====
+
+^ ^ Starý index ^ Lucene ^
+| Model | vlastný TF-IDF, kosínusová podobnosť | BM25 |
+| Dokument | 1 text: profil, bio, kluby a súťaže z kariéry | 14 textových polí s váhami, 6 kľúčov, 8 čísel |
+| Dáta z wiki | nie | áno |
+| Spracovanie textu | vlastný tokenizer (bez diakritiky, stop slová) | analyzéry NAME a TEXT, Porter stemming |
+| Fráza, AND, NOT, fuzzy, pole | nie | áno |
+| Filtre | Python cyklus cez všetkých hráčov | ''FILTER'' priamo v Lucene |
+| Veľkosť | 5,8 MB (index.tsv, docs.tsv) | 8,3 MB (data/lucene) |
+| Načítanie | 3,0 s pri každom spustení search | 0,6 s + štart JVM 1,3 s, raz pri štarte servera |
+
+Príkaz ''lucene.cmd lucene-compare'' pošle 12 dopytov do oboch indexov.
+  * Starý index syntax Lucene nepozná: dostane rovnaký text bez názvov polí a fráza, ~, + aj - sú pre neho obyčajné OR.
+  * Čas je najlepší z 3 behov dopytu tak, ako ho robí aplikácia (počet výsledkov + top 5).
+  * Prekryv = koľko hráčov z top 5 je v oboch indexoch.
+
+^ # ^ Typ ^ Dopyt ^ Starý: hráči ^ Lucene: hráči ^ Starý ms ^ Lucene ms ^ Prekryv top 5 ^
+| 1 | Boolean OR + Term + Range | ''%%goalkeeper nationality=germany height>=195%%'' | 15 | 15 | 69,2 | 27,9 | 1/5 |
+| 2 | Phrase + Term | ''%%"real madrid" nationality=england%%'' | 11 | 3 | 53,8 | 22,0 | 2/5 |
+| 3 | Range bez textu | ''%%nat_goals>=60%%'' | 7 | 7 | 10,6 | 3,1 | 5/5 |
+| 4 | Boolean OR | ''young striker ajax academy'' | 2 115 | 3 118 | 4,7 | 16,0 | 0/5 |
+| 5 | Boolean OR | ''spanish defender premier league'' | 14 859 | 15 331 | 31,3 | 21,4 | 0/5 |
+| 6 | Boolean OR | ''goalkeeper penalty saves'' | 1 902 | 1 949 | 5,4 | 10,2 | 2/5 |
+| 7 | Boolean AND | ''%%+goalkeeper +penalty%%'' | 1 902 | 37 | 3,3 | 7,7 | 1/5 |
+| 8 | Term | ''ballon'' | 6 | 27 | 0,0 | 3,5 | 4/5 |
+| 9 | Boolean NOT | ''%%ballon -nationality:france%%'' | 1 929 | 23 | 5,4 | 2,9 | 4/5 |
+| 10 | Fuzzy | ''%%modrc~%%'' | 0 | 422 | 0,0 | 122,0 | 0/5 |
+| 11 | Pole (wiki) + AND + Range | ''%%+youth_clubs:ajax striker age<23%%'' | 107 | 47 | 50,9 | 5,5 | 1/5 |
+| 12 | Pole (wiki) | ''%%birth_place:zagreb%%'' | 147 | 41 | 0,3 | 1,4 | 0/5 |
+
+==== Ukážky top 5 ====
+
+Dopyt 2, ''%%"real madrid" nationality=england%%'':
+
+^ # ^ Starý index (TF-IDF) ^ Lucene (BM25) ^
+| 1 | Jude Bellingham (0,243) | Trent Alexander-Arnold (15,601) |
+| 2 | Trent Alexander-Arnold (0,232) | Jude Bellingham (15,262) |
+| 3 | Conor Gallagher (0,103) | Niall Mason (5,683) |
+| 4 | James Wright (0,097) | |
+| 5 | Ben Knight (0,078) | |
+
+Dopyt 6, ''goalkeeper penalty saves'':
+
+^ # ^ Starý index (TF-IDF) ^ Lucene (BM25) ^
+| 1 | Rome-Jayden Owusu-Oduro (0,230) | Marco Sportiello (11,655) |
+| 2 | Mile Svilar (0,095) | Daniel Batz (9,473) |
+| 3 | Florian Müller (0,085) | Mile Svilar (9,426) |
+| 4 | Sander Tangvik (0,084) | Orlando Gill (9,203) |
+| 5 | Dani Raba (0,079), útočník | Sander Tangvik (8,859) |
+
+==== Zistenia ====
+
+  * **Presnosť:** fráza, AND a NOT výrazne zúžia výsledky (dopyty 2, 7, 9). Starý index pri ''%%ballon -nationality:france%%'' naopak pridá Francúzov a Dembélé je prvý, Lucene ho vylúči.
+  * **Preklepy:** pri ''%%modrc~%%'' starý index nenájde nič, Lucene má Modriča prvého.
+  * **Wiki:**
+    * ''ballon'' nájde starý index u 6 hráčov (iba bio), Lucene u 27 (aj text a kategórie z wiki). Napríklad Modrić sa nájde iba cez wiki.
+    * ''%%birth_place:zagreb%%'' vráti 41 rodákov zo Záhrebu (Gvardiol, Sosa, Pjaca), starý index 147 hráčov s akýmkoľvek výskytom slova Zagreb (Dinamo Zagreb).
+  * **Relevancia:** pri dopyte 6 má Lucene v top 5 iba brankárov, starý index má na 5. mieste útočníka Dani Rabu.
+  * **Rovnaká množina, iné poradie:** pri dopyte 1 vrátia oba indexy tých istých 15 brankárov, top 5 sa však zhoduje iba v 1. TF-IDF normalizuje dĺžkou celého dokumentu (kosínus), BM25 počíta výskyty v jednotlivých poliach s váhami a saturáciou tf.
+  * **Slabina:** pri ''young striker ajax academy'' dá Lucene na vrch hráčov s priezviskom Young (Brad Young, Kadan Young), lebo pole name má váhu 3. Starý index tento problém nemá. V Lucene je lepšie hľadať v konkrétnom poli, napr. ''%%+youth_clubs:ajax striker age<23%%'' (dopyt 11).
+  * **Rýchlosť:** oba indexy odpovedajú v milisekundách.
+    * Lucene je rýchlejší pri filtroch (28 ms proti 69 ms), lebo filtre starého indexu prechádzajú v Pythone všetkých hráčov.
+    * Pomalší je pri fuzzy dopyte (122 ms, prechádza slovník termov v 14 poliach). Pri jednoduchých dopytoch bez filtrov je starý index v pamäti o pár ms rýchlejší (Lucene hľadá v 14 poliach a volania idú cez Python-Java).
+    * Starý index sa pri každom ''search'' načítava 3 s, Lucene server iba raz.
+
+===== 6. Testy =====
+
+  * ''tests/test_lucene.py'': 18 unit testov.
+    * 7 bez Lucene: prevod veku na rozsah dátumov (deň po dni aj okolo 29. 2.), polia dokumentu.
+    * 11 nad malým indexom v pamäti (''ByteBuffersDirectory''): fráza nespojí dva kluby, fuzzy, hľadanie bez diakritiky, hľadanie v poli, AND/NOT, stemming, všetky typy filtrov, filter nemení skóre, top k a počet, neplatný dopyt.
+  * Spolu 66 testov, všetky prechádzajú (''lucene.cmd test''). Na Windows (''py main.py test'') sa Lucene testy preskočia.
+
+===== 7. GitHub =====
+
+  * [[https://github.com/MarekPenzes/VINF_Crawler|github.com/MarekPenzes/VINF_Crawler]]

@@ -4,14 +4,19 @@ Prikazy:
   extract        regex extrakcia -> players.tsv, career.tsv
   spark-extract  ta ista extrakcia cez Spark              py main.py spark-extract --limit 1000
   index          invertovany index -> index.tsv, docs.tsv
-  search         vyhladavanie z prikazoveho riadku        py main.py search "left footed winger" age<23 --idf prob
+  search         vyhladavanie, TF-IDF alebo Lucene        py main.py search "left footed winger" "age<23" --idf prob
   compare        porovnanie idf metod na dopytoch         py main.py compare
   wiki           Spark: wiki dump -> wiki_players.tsv     py main.py wiki --parse-only
   join           Spark: players.tsv x wiki -> joined.tsv  py main.py join
+  lucene-index   PyLucene index -> data/lucene            lucene.cmd lucene-index
+  lucene-serve   server pre search --index lucene         lucene.cmd lucene-serve
+  lucene-compare porovnanie TF-IDF a Lucene indexu        lucene.cmd lucene-compare
   stats          statistiky a tokeny (tiktoken)           py main.py stats --html
-  test           unit testy extraktora a wiki parsera     py main.py test -v
+  test           unit testy (extraktor, wiki, Lucene)     py main.py test -v
   all            extract, index a test po sebe (bez crawlu, wiki a statistik)
-Argumenty za prikazom dostane priamo dany modul, napr. py main.py search --help."""
+Argumenty za prikazom dostane priamo dany modul, napr. py main.py search --help.
+Prikazy lucene-* potrebuju PyLucene, na Windows bezia v Docker kontajneri cez lucene.cmd.
+Lucene vyhladavanie: lucene.cmd lucene-serve, potom py main.py search goalkeeper "height>=195" --index lucene"""
 
 import importlib
 import os
@@ -22,10 +27,12 @@ from config import BASE_DIR
 
 TESTS_DIR = os.path.join(BASE_DIR, "tests")
 # prikaz -> modul s funkciou main(argv); importuje sa az pri pouziti, aby napr. vyhladavanie
-# nepotrebovalo curl_cffi (crawler), tiktoken (statistiky) ani pyspark (Spark joby)
+# nepotrebovalo curl_cffi (crawler), tiktoken (statistiky), pyspark (Spark joby) ani PyLucene
 COMMANDS = {"crawl": "crawler", "extract": "extractor", "spark-extract": "spark_extract",
             "index": "indexer", "search": "search", "compare": "compare",
-            "wiki": "wiki_extract", "join": "wiki_join", "stats": "stats"}
+            "wiki": "wiki_extract", "join": "wiki_join",
+            "lucene-index": "lucene_index", "lucene-serve": "lucene_server",
+            "lucene-compare": "lucene_compare", "stats": "stats"}
 PIPELINE = ["extract", "index", "test"]   # prikaz all
 
 

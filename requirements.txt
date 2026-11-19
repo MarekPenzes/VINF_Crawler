@@ -2,3 +2,5 @@ curl_cffi==0.16.3
 tiktoken==0.14.0
 # Spark joby (spark_extract, wiki_extract, wiki_join); potrebuje Javu 17 alebo 21
 pyspark==4.0.5
+# PyLucene 10.0.0 (lucene_index, lucene_server, lucene_compare) nie je na pip ani pre Windows,
+# bezi v Docker image coady/pylucene:10.0.0 cez lucene.cmd

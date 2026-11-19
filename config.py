@@ -26,3 +26,8 @@ WIKI_DUMP = os.path.join(WIKI_DIR, "enwiki-latest-pages-articles.xml.bz2")
 WIKI_PAGES_DIR = os.path.join(WIKI_DIR, "football")   # stranky futbalistov vyfiltrovane z dumpu
 WIKI_FILE = os.path.join(DATA_DIR, "wiki_players.tsv")
 JOIN_FILE = os.path.join(DATA_DIR, "joined.tsv")
+
+# Lucene index (PyLucene, bezi v Docker kontajneri, pozri lucene.cmd)
+LUCENE_DIR = os.path.join(DATA_DIR, "lucene")
+LUCENE_PORT = 8765                                   # lucene_server.py, rovnaky port mapuje lucene.cmd
+LUCENE_URL = f"http://127.0.0.1:{LUCENE_PORT}/search"

@@ -396,12 +396,12 @@ Súbor ''tests/test_extractor.py'', spustenie ''%%py main.py test%%''. Výsledok
 Príkaz ''%%py main.py stats --html%%'', knižnica ''tiktoken'', kódovania ''cl100k_base'' (GPT-4) a ''o200k_base'' (GPT-4o).
 
 ^ Dáta ^ cl100k_base ^ o200k_base ^
-| HTML stránky (18823) | DOPLNIŤ (py main.py stats --html) | DOPLNIŤ |
+| HTML stránky (18823) | 2 760 278 581 | 2 778 829 891 |
 | players.tsv | 1 720 160 | 1 696 547 |
 | career.tsv | 13 997 926 | 13 846 481 |
 | bio (text životopisov) | 684 243 | 664 263 |
 
-Extrahované dáta (players.tsv a career.tsv) majú približne DOPLNIŤ % tokenov surového HTML.
+Extrahované dáta (players.tsv a career.tsv) majú približne 0,57 % tokenov surového HTML (cl100k_base 15 718 086, o200k_base 15 543 028), teda HTML je asi 175-krát väčšie.
 
 <color #ed1c24>**2b. Konzultacia &&
 1. Odovzdanie - uzavrete**</color>

@@ -1,13 +1,20 @@
 """Vyhladavanie hracov: text dopytu sa zoradi podla kosinusovej podobnosti TF-IDF vektorov,
 filtre (filters.py) pred tym obmedzia, ktori hraci do vysledku vobec mozu patrit.
+S --index lucene ide rovnaky dopyt do Lucene indexu (lucene_search.py, skore BM25): v kontajneri
+s PyLucene priamo, na Windows cez Lucene server (lucene_server.py, spusta sa lucene.cmd lucene-serve).
 
-Pouzitie: py search.py "left footed winger eredivisie" nationality=spain age>19 --idf prob"""
+Pouzitie: py search.py "left footed winger eredivisie" nationality=spain age>19 --idf prob
+          py main.py search goalkeeper "height>=195" nationality=germany --index lucene"""
 import argparse
+import importlib.util
+import json
 import math
 import sys
+import urllib.error
+import urllib.request
 from collections import Counter, defaultdict
 
-from config import PLAYERS_FILE
+from config import LUCENE_URL, PLAYERS_FILE
 from filters import FilterError, age, is_filter, matches, parse_filter
 from indexer import load_index
 from tokenizer import tokenize
@@ -91,10 +98,13 @@ class SearchEngine:
         return sorted(results, key=lambda item: (-item[1], item[0]))
 
     def describe(self, doc_id):
-        """Kratky popis hraca do vypisu: meno (pozicia, klub, krajina, vek)."""
-        p = self.players[doc_id]
-        years = f"{age(p['birth_date'])} r." if p["birth_date"] else "vek ?"
-        return f"{p['name']} ({p['position']}, {p['club']}, {p['nationality']}, {years})"
+        return describe_player(self.players[doc_id])
+
+
+def describe_player(p):
+    """Kratky popis hraca do vypisu: meno (pozicia, klub, krajina, vek)."""
+    years = f"{age(p['birth_date'])} r." if p["birth_date"] else "vek ?"
+    return f"{p['name']} ({p['position']}, {p['club']}, {p['nationality']}, {years})"
 
 
 def split_query(args):
@@ -108,17 +118,46 @@ def split_query(args):
     return " ".join(words), raw_filters, [parse_filter(arg) for arg in raw_filters]
 
 
-def print_results(engine, results, top=TOP_K):
-    print(f"Najdenych hracov: {len(results)}")
-    for rank, (doc_id, score) in enumerate(results[:top], 1):
+def print_results(total, rows):
+    """total = pocet vsetkych vysledkov, rows = [(skore alebo None, popis hraca)] na vypis."""
+    print(f"Najdenych hracov: {total}")
+    for rank, (score, text) in enumerate(rows, 1):
         score_text = f"{score:.4f}" if score is not None else "  -   "
-        print(f"{rank:3}. {score_text}  {engine.describe(doc_id)}")
+        print(f"{rank:3}. {score_text}  {text}")
+
+
+def ask_server(text, raw_filters, top):
+    """Posle dopyt Lucene serveru a vrati (pocet, [(skore, popis)]); ak server nebezi, skonci s navodom."""
+    data = json.dumps({"text": text, "filters": raw_filters, "top": top}).encode("utf-8")
+    request = urllib.request.Request(LUCENE_URL, data, {"Content-Type": "application/json"})
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))   # lokalny server, bez proxy
+    try:
+        with opener.open(request, timeout=30) as response:
+            answer = json.load(response)
+    except urllib.error.HTTPError as error:              # 400: neplatny dopyt alebo filter
+        sys.exit(json.load(error)["error"])
+    except (urllib.error.URLError, ConnectionError):
+        sys.exit(f"Lucene server nebezi ({LUCENE_URL}), spusti ho v inom terminali: lucene.cmd lucene-serve")
+    return answer["total"], answer["results"]
+
+
+def search_lucene(text, raw_filters, filters, top):
+    """Dopyt v Lucene indexe -> (pocet, [(skore, popis)]): s PyLucene priamo, bez neho cez server."""
+    if importlib.util.find_spec("lucene") is None:
+        return ask_server(text, raw_filters, top)
+    from lucene_search import LuceneEngine, QueryError
+    try:
+        return LuceneEngine().answer(text, filters, top)
+    except QueryError as error:
+        sys.exit(str(error))
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Vyhladavanie hracov v indexe (TF-IDF + filtre).")
+    parser = argparse.ArgumentParser(description="Vyhladavanie hracov v indexe (TF-IDF alebo Lucene + filtre).")
     parser.add_argument("query", nargs="+", help='slova dopytu a filtre, napr. "striker" nationality=spain age>19')
-    parser.add_argument("--idf", choices=IDF_METHODS, default="classic", help="metoda vypoctu idf")
+    parser.add_argument("--index", choices=["tfidf", "lucene"], default="tfidf",
+                        help="tfidf = vlastny index, lucene = PyLucene index (na Windows cez lucene.cmd lucene-serve)")
+    parser.add_argument("--idf", choices=IDF_METHODS, default="classic", help="metoda vypoctu idf (iba tfidf)")
     parser.add_argument("--top", type=int, default=TOP_K, help="kolko vysledkov vypisat")
     args = parser.parse_args(argv)
     try:
@@ -127,12 +166,17 @@ def main(argv=None):
         parser.error(str(error))
 
     sys.stdout.reconfigure(encoding="utf-8")   # mena s diakritikou aj v konzole Windows (cp1252)
+    if args.index == "lucene":
+        print(f'Dopyt: "{text}" | filtre: {" ".join(raw_filters) or "-"} | index: lucene (BM25)')
+        print_results(*search_lucene(text, raw_filters, filters, args.top))
+        return
     engine = SearchEngine()
     unknown = [term for term in tokenize(text) if term not in engine.index]
     print(f'Dopyt: "{text}" | filtre: {" ".join(raw_filters) or "-"} | idf: {args.idf}')
     if unknown:
         print(f"Termy, ktore nie su v indexe (ignoruju sa): {', '.join(unknown)}")
-    print_results(engine, engine.search(text, filters, args.idf), args.top)
+    results = engine.search(text, filters, args.idf)
+    print_results(len(results), [(score, engine.describe(doc_id)) for doc_id, score in results[:args.top]])
 
 
 if __name__ == "__main__":

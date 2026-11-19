@@ -5,7 +5,7 @@ pismen a diakritiku (rovnaky normalize ako v tokenizeri), ciselne polia ako cele
 Hrac, ktoremu hodnota pola chyba, filter nesplni."""
 import operator
 import re
-from datetime import date
+from datetime import date, timedelta
 
 from tokenizer import normalize
 
@@ -38,6 +38,34 @@ def age(birth_date, today=None):
     today = today or date.today()
     born = date.fromisoformat(birth_date)
     return today.year - born.year - ((today.month, today.day) < (born.month, born.day))
+
+
+def born_by(years, today=None):
+    """Posledny datum narodenia, pri ktorom ma hrac dnes aspon `years` rokov (29. 2. -> 28. 2.)."""
+    today = today or date.today()
+    try:
+        return today.replace(year=today.year - years)
+    except ValueError:
+        return today.replace(year=today.year - years, day=28)
+
+
+def birth_date_range(op, years, today=None):
+    """Filter veku -> rozsah datumov narodenia (od, do) vratane, None = bez hranice.
+    Index (Lucene) ma iba datum narodenia, vek sa meni kazdy den, preto sa prevadza az pri dopyte.
+    Operator != sa riesi ako negacia rozsahu pre =."""
+    def after(years):
+        return born_by(years, today) + timedelta(days=1)
+
+    ranges = {
+        ">=": (None, born_by(years, today)),
+        ">": (None, born_by(years + 1, today)),
+        "<=": (after(years + 1), None),
+        "<": (after(years), None),
+        "=": (after(years + 1), born_by(years, today)),
+    }
+    if op not in ranges:
+        raise FilterError(f"vek nepodporuje operator {op} ako rozsah")
+    return ranges[op]
 
 
 def parse_filter(arg):
