@@ -1,0 +1,116 @@
+====== Konzultácia 5: Evaluácia ======
+
+===== 1. Metodika =====
+
+  * **Porovnávané systémy:**
+    * **starý index:** vlastný TF-IDF (fáza 2),
+    * **Lucene:** PyLucene index s dátami z wiki, BM25 (fáza 4),
+    * **Google:** dopyt s ''site:worldfootball.com'', anonymné okno, iba bežné výsledky (bez reklám),
+    * **worldfootball:** vyhľadávanie v hlavičke stránky worldfootball.com (našepkávač, záložka All).
+  * **Dopyty:** 6 informačných potrieb, každá testuje inú schopnosť (fráza, rozsah, pole z wiki, preklep, fulltext). Hľadané 19. 11. 2026.
+  * **Relevancia:** relevantný je výsledok, ktorý je konkrétny hráč spĺňajúci potrebu. Stránka tímu, súťaže, správ či PDF relevantná nie je, aj keď hráča spomína.
+    * Splnenie potreby som overil v dátach (players.tsv, wiki) a pri Zlatej lopte podľa zoznamu víťazov.
+    * Hráč, ktorému sa podmienka nedá overiť (napr. neznáme miesto narodenia), sa ráta ako nerelevantný.
+  * **Metrika:** počet relevantných výsledkov v top 5 / počet zobrazených výsledkov (max 5). Dopyt 5 hľadá jedného konkrétneho hráča, preto sa pri ňom hodnotí poradie hľadaného hráča.
+  * Naše výsledky vypíše ''lucene.cmd evaluate'' (súbor ''evaluate.py'').
+
+^ # ^ Informačná potreba ^ Náš dopyt ^ Google (site:worldfootball.com ...) ^ worldfootball ^
+| 1 | Angličania, ktorí hrajú alebo hrali za Real Madrid | ''%%"real madrid" nationality=england%%'' | english players real madrid | real madrid |
+| 2 | Nemeckí brankári vyšší ako 195 cm | ''%%goalkeeper nationality=germany height>=195%%'' | german goalkeeper height 195 cm | goalkeeper |
+| 3 | Odchovanci Ajaxu mladší ako 23 rokov | ''%%youth_clubs:ajax age<23%%'' | ajax academy players under 23 | ajax |
+| 4 | Hráči narodení v Záhrebe | ''%%birth_place:zagreb%%'' | players born in zagreb | zagreb |
+| 5 | Luka Modrić napísaný s preklepom | ''%%modrc~%%'' | modrc | modrc |
+| 6 | Víťazi Zlatej lopty (Ballon d'Or) | ''%%"ballon d'or"%%'' | ballon d'or winners | ballon d'or |
+
+Starý index syntax Lucene nepozná, dostane rovnaký text bez názvov polí (''youth_clubs:ajax'' -> ''ajax''). Filtre fungujú v oboch indexoch rovnako.
+
+===== 2. Súhrn =====
+
+Relevantné / zobrazené výsledky v top 5:
+
+^ # ^ Informačná potreba ^ Starý index ^ Lucene ^ Google ^ worldfootball ^
+| 1 | Angličania v Reale Madrid | 2/5 | 3/3 | 0/5 | 0/5 |
+| 2 | Nemeckí brankári nad 195 cm | 5/5 | 5/5 | 0/0 | 0/0 |
+| 3 | Odchovanci Ajaxu do 23 rokov | 5/5 | 5/5 | 0/5 | 0/5 |
+| 4 | Narodení v Záhrebe | 2/5 | 5/5 | 0/4 | 0/5 |
+| 6 | Víťazi Zlatej lopty | 2/5 | 3/5 | 0/1 | 0/5 |
+| | **Spolu (presnosť)** | **16/25 (64 %)** | **21/23 (91 %)** | **0/15 (0 %)** | **0/20 (0 %)** |
+
+^ # ^ Hľadaný hráč ^ Starý index ^ Lucene ^ Google ^ worldfootball ^
+| 5 | Luka Modrić (dopyt modrc) | nenájdený (0 výsledkov) | **1. miesto** | nenájdený | nenájdený |
+
+===== 3. Výsledky dopytov =====
+
+Relevantné výsledky sú **tučne**.
+
+==== 1. Angličania, ktorí hrajú alebo hrali za Real Madrid ====
+
+^ # ^ Starý index ^ Lucene ^ Google ^ worldfootball ^
+| 1 | **Jude Bellingham** | **Trent Alexander-Arnold** | Real Madrid - Squad (súpiska tímu) | Real Madrid (tím) |
+| 2 | **Trent Alexander-Arnold** | **Jude Bellingham** | Iñaki Williams (Athletic Bilbao) | Real Madrid (tím žien) |
+| 3 | Conor Gallagher (Atlético Madrid) | **Niall Mason** (mládež Realu podľa wiki) | Vysoke Myto (tím) | Real Madrid U19 II (tím) |
+| 4 | James Wright | | Deusto (tím) | Real Madrid P. Bajada (tím) |
+| 5 | Ben Knight | | Arenteiro (tím) | Ciudad Real Madrid Campo 3 (štadión) |
+
+==== 2. Nemeckí brankári vyšší ako 195 cm ====
+
+^ # ^ Starý index ^ Lucene ^ Google ^ worldfootball ^
+| 1 | **Alexander Weidinger** | **Lars Unnerstall** | žiadne výsledky | žiadne výsledky |
+| 2 | **Lukas Watkowiak** | **Silas Ostrzinski** | | |
+| 3 | **Bela Dumrath** | **Alexander Meyer** | | |
+| 4 | **Kaylen** | **Florian Stritzel** | | |
+| 5 | **Alexander Brunst** | **Alexander Weidinger** | | |
+
+==== 3. Odchovanci Ajaxu mladší ako 23 rokov ====
+
+^ # ^ Starý index ^ Lucene ^ Google ^ worldfootball ^
+| 1 | **Jinairo Johnson** | **Tom de Graaff** | výročná správa BVB (PDF) | Ajax (tím) |
+| 2 | **Luca Messori** | **Precious Ugwu** | Quinten Timber (odchovanec, ale 25 rokov) | Ajax (tím žien) |
+| 3 | **Paul Reverson** | **Paul Reverson** | Untitled (PDF) | Kévin Ajax (hráč s priezviskom Ajax) |
+| 4 | **Jeshurun Simeon** | **Ryan van de Pavert** | Latest football news (správy) | Ajax Asja (tím) |
+| 5 | **Mylo van der Lans** | **Skye Vink** | Námestovo (tím) | Ajax Amateurs (tím) |
+
+==== 4. Hráči narodení v Záhrebe ====
+
+^ # ^ Starý index ^ Lucene ^ Google ^ worldfootball ^
+| 1 | Noa Mikic (miesto narodenia neznáme) | **Marko Pjaca** | Muhamed Al-Ghoul (iba "Born in Croatia") | Zagreb (tím) |
+| 2 | Ivan Nevistic (narodený v Đakove) | **Borna Sosa** | Presidente Hayes (tím) | Zagreb City (tím) |
+| 3 | **Luka Stojkovic** | **Josko Gvardiol** | Qormi (tím) | Dinamo Zagreb (tím) |
+| 4 | Marko Zebic (miesto narodenia neznáme) | **Art Smakaj** | Lija Athletic (tím) | Vrapče Zagreb (tím) |
+| 5 | **Luka Vrbancic** | **Ivan Fiolic** | | Dubrava Zagreb (tím) |
+
+==== 5. Luka Modrić napísaný s preklepom (modrc) ====
+
+^ # ^ Starý index ^ Lucene ^ Google ^ worldfootball ^
+| 1 | 0 výsledkov | **Luka Modrić** | Tai Luka Modric (iný hráč, Slovinsko) | Lehel-Hunor Modra |
+| 2 | | Jakub Moder | Celje vs Aluminij (zápas) | |
+| 3 | | Jakov Medic | | |
+| 4 | | Kieffer Moore | | |
+| 5 | | Mikey Moore | | |
+
+Google dopyt sám opravil na "modric".
+
+==== 6. Víťazi Zlatej lopty (Ballon d'Or) ====
+
+^ # ^ Starý index ^ Lucene ^ Google ^ worldfootball ^
+| 1 | **Ousmane Dembélé** | **Ousmane Dembélé** | Latest football news (správy) | Camilo César Jiménez Ballón |
+| 2 | **Rodri** | **Rodri** | | Josepmir Ballón |
+| 3 | Vinicius Junior | Lamine Yamal | | Lucas Ballón |
+| 4 | Vitinha | **Luka Modrić** | | Monica Belen Ballon Paye |
+| 5 | Lamine Yamal | Vinicius Junior | | Vincchenzo Luck Giovanni Ballón Quiróz |
+
+===== 4. Zistenia =====
+
+  * **Otázky podľa atribútov vie zodpovedať iba náš systém.** Google ani worldfootball nemajú v top 5 ani jedného relevantného hráča. Krajina, pozícia, výška, vek, miesto narodenia či mládežnícke kluby sú v našom indexe samostatné polia a filtre.
+  * **Vyhľadávanie na worldfootball.com** je našepkávač podľa názvu tímu, súťaže, osoby alebo štadióna:
+    * slová dopytu hľadá iba v názvoch: ''ballon d'or'' vráti hráčov s priezviskom Ballón, ''ajax'' hráča Kévin Ajax,
+    * preklep nezvládne (''modrc'' -> Lehel-Hunor Modra), na ''goalkeeper'' nevráti nič.
+  * **Google** s ''site:worldfootball.com'' vracia hlavne stránky tímov, správy a PDF:
+    * obsah profilov hráčov má zaindexovaný iba čiastočne, pri výške 195 cm nevráti nič,
+    * preklep opraví (''modrc'' -> ''modric''), ale nájde iného hráča (Tai Luka Modric zo Slovinska).
+  * **Lucene oproti starému indexu:**
+    * pri dopytoch s filtrami (2, 3) sú oba rovnako dobré, lebo filtre fungujú rovnako,
+    * Lucene je lepší pri fráze (1: starý index pridá Gallaghera z Atlética Madrid), pri poli z wiki (4: starý index nájde každého s Dinamom Záhreb), pri preklepe (5) aj vďaka textu z wiki (6: Modrić).
+  * **Obmedzenia nášho systému:**
+    * fulltext nájde zmienku o Zlatej lopte, ale nerozlíši víťaza od nominovaného (Vinicius Junior, Lamine Yamal),
+    * aktuálnosť dát: podľa Googlu je držiteľom Zlatej lopty Harry Kane, v jeho bio ani wiki abstrakte to však nie je, preto ho systém nenájde.

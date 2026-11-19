@@ -11,6 +11,7 @@ Prikazy:
   lucene-index   PyLucene index -> data/lucene            lucene.cmd lucene-index
   lucene-serve   server pre search --index lucene         lucene.cmd lucene-serve
   lucene-compare porovnanie TF-IDF a Lucene indexu        lucene.cmd lucene-compare
+  evaluate       top 5 na evaluaciu (Google, domena)      lucene.cmd evaluate
   stats          statistiky a tokeny (tiktoken)           py main.py stats --html
   test           unit testy (extraktor, wiki, Lucene)     py main.py test -v
   all            extract, index a test po sebe (bez crawlu, wiki a statistik)
@@ -32,7 +33,7 @@ COMMANDS = {"crawl": "crawler", "extract": "extractor", "spark-extract": "spark_
             "index": "indexer", "search": "search", "compare": "compare",
             "wiki": "wiki_extract", "join": "wiki_join",
             "lucene-index": "lucene_index", "lucene-serve": "lucene_server",
-            "lucene-compare": "lucene_compare", "stats": "stats"}
+            "lucene-compare": "lucene_compare", "evaluate": "evaluate", "stats": "stats"}
 PIPELINE = ["extract", "index", "test"]   # prikaz all
 
 
