@@ -1,0 +1,338 @@
+====== Odovzdanie druhej časti projektu ======
+
+===== 1. Prehľad =====
+
+  * **Cieľ druhej časti:** doplniť hráčov z worldfootball.com o dáta z anglickej Wikipédie (Spark), postaviť nový index v PyLucene a vyhodnotiť ho proti starému indexu, Googlu a vyhľadávaniu na worldfootball.com.
+  * **GitHub:** [[https://github.com/MarekPenzes/VINF_Crawler|github.com/MarekPenzes/VINF_Crawler]], ZIP s kódom v časti 9.
+  * **Spustenie:** všetko cez ''main.py''. Príkazy s PyLucene bežia v Docker kontajneri cez ''lucene.cmd'' (časť 5).
+
+<code>
+py main.py spark-extract       (extrakcia HTML cez Spark)
+py main.py wiki                (filter dumpu + parsovanie, cca 55 min)
+py main.py wiki --parse-only   (iba parsovanie uz vyfiltrovanych stranok, cca 1 min)
+py main.py join                (join hracov s wiki, cca 30 s)
+lucene.cmd lucene-index        (Lucene index, 17 s)
+lucene.cmd lucene-serve        (vyhladavaci server, nechat bezat v druhom terminali)
+py main.py search goalkeeper "height>=195" nationality=germany --index lucene
+lucene.cmd lucene-compare      (stary vs novy index)
+lucene.cmd evaluate            (nase vysledky na evaluaciu)
+lucene.cmd test                (vsetky testy, na Windows: py main.py test bez Lucene testov)
+</code>
+
+===== 2. Architektúra Sparku =====
+
+  * **Prostredie:** PySpark 4.0.5, Java 21, lokálny režim ''local[*]'' (8 vlákien, 16 GB RAM). Na clustri stačí zmeniť ''%%--master%%''.
+  * **Tri Spark joby** a za nimi Lucene index:
+
+<code>
+ data/html/ (18 823 HTML)                    enwiki dump (24 GB bz2)
+          |                                            |
+   spark-extract                            wiki: filter v JVM
+   (regex extraktor, 16 particii)           (clanok + infobox futbalistu)
+          |                                            |
+ players.tsv, career.tsv                    data/wiki/football/ (215 561 stranok)
+          |                                            |
+          |                                 regex parser (wikitext.py)
+          |                                            |
+          |                                 wiki_players.tsv (215 561)
+          |                                            |
+          +--------> join (datum narodenia + meno) <---+
+          |                      |
+          |           joined.tsv (12 477 hracov)
+          |                      |
+          +--------> lucene-index (PyLucene, Docker)
+                                 |
+                     data/lucene/ (18 823 dokumentov)
+                                 |
+           lucene-serve (HTTP) <---- py main.py search ... --index lucene
+</code>
+
+^ Príkaz ^ Súbor ^ Vstup ^ Výstup ^ Čas ^
+| ''py main.py spark-extract'' | spark_extract.py | data/html/ (18 823 HTML) | players.tsv, career.tsv | - |
+| ''py main.py wiki'' | wiki_extract.py, wikitext.py | enwiki dump, 24,03 GB | wiki_players.tsv, 240 MB | 3 235 s filter + 57 s parser |
+| ''py main.py join'' | wiki_join.py | players.tsv, wiki_players.tsv | joined.tsv, 15,9 MB | 33 s |
+
+  * **spark-extract:** Spark rozdelí cesty k HTML do 16 partícií a každý Python worker spustí ten istý regex extraktor ako v prvej časti. Výstup je zhodný s ''extractor.py'' (overené na 1 000 stránkach).
+  * **Spark na Windows:**
+    * bez ''winutils.exe'' Spark nevie zapisovať cez Hadoop, preto každá partícia zapíše svoj súbor obyčajným Pythonom a driver ich spojí (''spark_utils.write_parts''),
+    * súbory sa Sparku zadávajú zoznamom (výpis priečinka cez Hadoop zlyhá),
+    * Python worker má socket timeout 15 s, pri dlhom filtri dumpu padal, preto ''spark.python.authenticate.socketTimeout=1h'',
+    * workery sa na Windows nepoužívajú opakovane, preto 16 väčších partícií namiesto stoviek malých.
+  * Diagramy v Mermaid sú v ''diagram.md'', sekcie 3 (Spark pipeline) a 4 (join).
+
+===== 3. Spracovanie wiki dumpu =====
+
+  * **Dump:** ''enwiki-latest-pages-articles.xml.bz2'', 24,03 GB.
+  * **Krok 1, filter v JVM:**
+    * dump sa číta ako text s oddeľovačom ''%%</page>%%'', 1 záznam = 1 stránka, bz2 bloky číta paralelne viac taskov,
+    * filter beží v JVM (Spark SQL): článok ''%%<ns>0</ns>%%'' a regex ''%%(?i)\{\{\s*infobox[ _]football[ _]biography%%'',
+    * do Pythonu prejde iba 215 561 stránok (1,80 GB XML). Uložia sa do ''data/wiki/football/'', aby sa dump nemusel čítať pri každej zmene parsera.
+  * **Krok 2, regex parser (''wikitext.py''):**
+    * **infobox:** samotný regex vnorené šablóny nezvládne, preto sa hľadajú tokeny ''%%{{ }} [[ ]] |%%'', počíta sa hĺbka vnorenia a polia sa delia iba na najvyššej úrovni,
+    * **čistenie textu:** opakovane sa nahrádzajú najvnorenejšie šablóny a odkazy ''%%[[cieľ|text]]%%'', mažú sa referencie, komentáre a HTML značky,
+    * **dátum narodenia:** ''%%{{birth date and age|2004|5|3}}%%'', mesiac aj slovom, a text "5 September 2001",
+    * **výška:** ''%%{{height|m=1.85}}%%'', ''%%{{convert|185|cm}}%%'', "5 ft 11 in", prevod na cm,
+    * **kariéra:** očíslované polia ''years1, clubs1, caps1, goals1'' -> "2021-2023 Liverpool (45/1)",
+    * **úvodný text** pred prvým nadpisom, **kategórie** z ''%%[[Category:...]]%%'',
+    * duplicity (stránka na hranici dvoch bz2 blokov) sa odstránia podľa id cez ''reduceByKey''.
+
+^ Pole wiki_players.tsv ^ Vyplnené ^ Príklad (Conor Bradley) ^
+| name | 100,0 % | Conor Bradley |
+| full_name | 68,6 % | Conor Bradley |
+| birth_date | 96,6 % | 2003-07-09 |
+| birth_place | 94,7 % | Castlederg, County Tyrone, Northern Ireland |
+| height_cm | 69,4 % | 180 |
+| position | 96,8 % | Right-back |
+| current_club | 42,7 % | Liverpool |
+| youth_clubs | 59,7 % | 2012-2016 St Patrick's; 2016-2019 Dungannon Swifts; 2019-2021 Liverpool |
+| clubs | 96,4 % | 2021- Liverpool (45/1); 2022-2023 Bolton Wanderers (loan) (41/5) |
+| national_teams | 51,5 % | 2021- Northern Ireland (30/4) |
+| categories | 100,0 % | 2003 births; Living people; People from Castlederg; ... |
+| abstract | 100,0 % | Conor Bradley (born 9 July 2003) is a Northern Irish professional footballer ... |
+
+===== 4. Join s wiki =====
+
+  * **Problém:** worldfootball nemá odkaz na Wikipédiu ani Wikidata. Samotné meno nestačí: menovci, mononymy (Rodri), iný prepis z cyriliky (Gromov a Hromov).
+  * **Kľúč joinu:** dátum narodenia (presná zhoda) a zhoda mena.
+    * Spark equi-join na ''birth_date'' spojí iba dvojice s rovnakým dátumom (v priemere 5,3 wiki stránky na dátum), na nich sa porovná meno (Python UDF ''name_score'').
+  * **Porovnanie mien:**
+    * tokeny bez diakritiky a veľkých písmen, bez iniciál a častíc (al, de, van ...),
+    * z wiki sa berie titulok bez dovetku "(footballer, born 1996)", ''name'' aj ''full_name'' z infoboxu,
+    * token sedí presne alebo s toleranciou na prepis (difflib, podobnosť aspoň 0,7),
+    * viacslovné meno musí sedieť aspoň v 2 tokenoch (Paul Martin nie je John Martin), jednoslovné presne,
+    * skóre = priemerná podobnosť tokenov, presná zhoda tak vyhrá nad podobnou.
+  * **Jednoznačnosť:** hráč dostane stránku s najvyšším skóre, pri remíze sa vynechá, rovnako jedna stránka patrí jednému hráčovi. Výnimkou je remíza so skóre 1: duplicitné profily jedného hráča na worldfootball ("Rajmund Tóth" a "Tóth Rajmund").
+
+^ Krok ^ Počet ^
+| hráči (players.tsv) | 18 823 |
+| hráči s dátumom narodenia | 18 593 |
+| stránky futbalistov z wiki | 215 561 |
+| wiki stránky s dátumom narodenia | 208 206 |
+| dvojice so zhodou dátumu aj mena | 12 501 |
+| **pripojení hráči** | **12 477** (67,1 % hráčov s dátumom) |
+| **unikátne pripojené wiki stránky** | **12 472** |
+| z toho presná zhoda mena (skóre 1) | 12 216 |
+
+^ Náš hráč ^ Wiki stránka ^ Skóre ^ Poznámka ^
+| Jude Bellingham | Jude Bellingham | 1.0 | presná zhoda |
+| Artem Gromov | Artem Hromov | 0.917 | iný prepis priezviska |
+| Rajmund Tóth, Tóth Rajmund | Rajmund Tóth | 1.0 | 2 profily jedného hráča |
+| Paul Martin | John Martin (footballer, born 1999) | - | zamietnuté, sedí iba priezvisko |
+
+  * Nepripojení hráči (cca 6 100 s dátumom) sú väčšinou mladí hráči z nižších líg bez článku na anglickej Wikipédii.
+
+==== Zaindexované atribúty z wiki ====
+
+^ Atribút ^ Pripojení hráči ^ Pole v Lucene ^ Na čo ^
+| abstract | 12 477, z toho 9 028 bez vlastného bio | abstract (TextField, TEXT) | fulltext, text aj pre hráčov bez bio (80 % hráčov bio nemá) |
+| birth_place | 12 264 | birth_place (TextField, NAME) | ''%%birth_place:zagreb%%'', worldfootball miesto narodenia nemá |
+| youth_clubs | 11 855 | youth_clubs (TextField, NAME, viac hodnôt) | ''%%youth_clubs:ajax%%'', odchovanci klubov a akadémií |
+| full_name | 8 638 | full_name (TextField, NAME, váha 2) | celé meno (Rodri = Rodrigo Hernández Cascante) |
+| categories | 12 477 | categories (TextField, TEXT, váha 0,5) | hotové skupiny ("AFC Ajax players") |
+| height_cm | 341 hráčov bez výšky | height_cm (IntPoint) | doplnenie chýbajúcej výšky pre filter ''%%height>=195%%'' |
+| url | 12 477 | wiki_url (StoredField) | odkaz na článok vo výsledku |
+
+===== 5. PyLucene index =====
+
+  * **Prostredie:** PyLucene 10.0.0 (Lucene 10.0.0). PyLucene nemá balík pre pip ani pre Windows (Java Lucene sa obaľuje nástrojom JCC a kompiluje v C++), preto beží v Docker image ''coady/pylucene:10.0.0''. ''lucene.cmd'' pripojí priečinok projektu do kontajnera, dáta aj index ostávajú v ''data/''.
+  * **Dokument = 1 hráč:** 18 823 dokumentov, z toho 12 477 s wiki, 8,3 MB. Vstupy: players.tsv, career.tsv, joined.tsv.
+  * **Analyzéry** (''CustomAnalyzer'' + ''PerFieldAnalyzerWrapper''):
+    * **NAME** pre vlastné mená: ''StandardTokenizer'', ''LowerCase'', ''ASCIIFolding''. Bez stemmingu, aby sa názvy nemenili, ''modric'' nájde Modrić.
+    * **TEXT** pre anglický text: navyše ''EnglishPossessive'', ''Stop'' a ''PorterStem'' (saves, saved -> save).
+    * Viac hodnôt jedného poľa má medzi sebou medzeru 100 pozícií, aby fráza "real madrid" nespojila dva rôzne kluby.
+  * **Skóre:** BM25. Text dopytu sa hľadá vo všetkých textových poliach naraz (''MultiFieldQueryParser'') s váhami polí.
+
+^ Pole ^ Typ ^ Zdroj ^ Váha ^ Prečo ^
+| name | TextField, NAME | players.tsv | 3 | najpresnejší identifikátor hráča |
+| full_name | TextField, NAME | wiki | 2 | celé meno |
+| club | TextField, NAME | players.tsv | 1,5 | súčasný klub je dôležitejší ako bývalé |
+| teams, competitions | TextField, NAME, viac hodnôt | career.tsv | 1 | všetky kluby, reprezentácie a súťaže z kariéry |
+| nationality, national_team, position, foot | TextField, NAME | players.tsv | 1 | atribúty v texte dopytu (goalkeeper, england) |
+| birth_place, youth_clubs | TextField, NAME | wiki | 1 | miesto narodenia a mládežnícke kluby |
+| bio | TextField, TEXT | players.tsv | 1 | životopis z worldfootball (19,6 % hráčov) |
+| abstract | TextField, TEXT | wiki | 1 | úvod článku z wiki |
+| categories | TextField, TEXT, viac hodnôt | wiki | 0,5 | dlhé zoznamy, preto nižšia váha |
+| name_key, club_key, nationality_key, national_team_key, position_key, foot_key | StringField | players.tsv | - | celá hodnota bez analýzy pre filtre =, != a ~ |
+| height_cm, club_apps, club_goals, club_assists, nat_apps, nat_goals, nat_assists | IntPoint + StoredField | players.tsv (výška aj z wiki) | - | range filtre |
+| birth_date | IntPoint + StoredField (YYYYMMDD) | players.tsv | - | filter veku, vek sa prevedie na rozsah dátumov až pri dopyte |
+| id | StringField, uložené | players.tsv | - | prepojenie výsledku s hráčom |
+| name_stored, wiki_url | StoredField | players.tsv, wiki | - | výpis a odkaz na wiki |
+| name_sort | SortedDocValuesField | players.tsv | - | zoradenie podľa mena pri dopyte iba s filtrami |
+
+  * Textové polia sa neukladajú (''Store.NO''), výpis berie údaje z players.tsv.
+
+==== Typy dopytov ====
+
+Text dopytu je v syntaxi Lucene ''QueryParser'', filtre sa prekladajú na Lucene dopyty. Celý dopyt je ''BooleanQuery'': text ako ''MUST'' (určuje skóre), filtre ako ''FILTER'' (obmedzia výsledky, skóre nemenia).
+
+^ Typ ^ Príklad ^ Lucene ^
+| Boolean OR | ''goalkeeper penalty saves'' | ''SHOULD'' (predvolené) |
+| Boolean AND | ''%%+goalkeeper +penalty%%'' | ''MUST'' |
+| Boolean NOT | ''%%ballon -nationality:france%%'' | ''MUST_NOT'' |
+| Phrase | ''%%"real madrid"%%'' | ''PhraseQuery'' |
+| Fuzzy | ''%%modrc~%%'' | ''FuzzyQuery'', najviac 2 zmeny znakov |
+| Hľadanie v poli | ''%%birth_place:zagreb%%'' | dopyt v jednom poli |
+| Range | ''%%height>=195%%'', ''%%age<23%%'' | ''IntPoint.newRangeQuery'' |
+| Term, Wildcard (filtre) | ''nationality=germany'', ''%%club~madrid%%'' | ''TermQuery'', ''WildcardQuery'' |
+
+==== Zapojenie do aplikácie ====
+
+  * Vyhľadávanie má rovnaký príkaz ako pri starom indexe, iba s ''%%--index lucene%%''. Filtre aj výpis sú rovnaké.
+  * Štart JVM a Dockeru trvá 5 až 10 s, preto ''lucene_server.py'' otvorí index raz a ''search.py'' mu posiela dopyty cez HTTP (iba na 127.0.0.1).
+  * Lucene vráti iba top k výsledkov, počet zistí ''IndexSearcher.count'' bez čítania dokumentov.
+
+<code>
+> py main.py search goalkeeper "height>=195" nationality=germany --index lucene
+Dopyt: "goalkeeper" | filtre: height>=195 nationality=germany | index: lucene (BM25)
+Najdenych hracov: 15
+  1. 4.4722  Lars Unnerstall (Goalkeeper, FC Twente, Germany, 36 r.)
+  2. 4.2884  Silas Ostrzinski (Goalkeeper, Borussia Dortmund, Germany, 23 r.)
+  3. 3.9656  Alexander Meyer (Goalkeeper, Borussia Dortmund, Germany, 35 r.)
+</code>
+
+===== 6. Evaluácia: starý vs nový index =====
+
+^ ^ Starý index ^ Lucene ^
+| Model | vlastný TF-IDF, kosínusová podobnosť | BM25 |
+| Dokument | 1 text: profil, bio, kluby a súťaže | 14 textových polí s váhami, 6 kľúčov, 8 čísel |
+| Dáta z wiki | nie | áno |
+| Fráza, AND, NOT, fuzzy, pole | nie | áno |
+| Veľkosť | 5,8 MB | 8,3 MB |
+| Načítanie | 3,0 s pri každom spustení search | 0,6 s + JVM 1,3 s, raz pri štarte servera |
+
+''lucene.cmd lucene-compare'': 12 dopytov, čas je najlepší z 3 behov (počet výsledkov + top 5). Starý index syntax Lucene nepozná, fráza, ~, + a - sú pre neho obyčajné OR.
+
+^ # ^ Typ ^ Dopyt ^ Starý: hráči ^ Lucene: hráči ^ Starý ms ^ Lucene ms ^ Prekryv top 5 ^
+| 1 | OR + Term + Range | ''%%goalkeeper nationality=germany height>=195%%'' | 15 | 15 | 69,2 | 27,9 | 1/5 |
+| 2 | Phrase + Term | ''%%"real madrid" nationality=england%%'' | 11 | 3 | 53,8 | 22,0 | 2/5 |
+| 3 | Range bez textu | ''%%nat_goals>=60%%'' | 7 | 7 | 10,6 | 3,1 | 5/5 |
+| 4 | Boolean OR | ''young striker ajax academy'' | 2 115 | 3 118 | 4,7 | 16,0 | 0/5 |
+| 5 | Boolean OR | ''spanish defender premier league'' | 14 859 | 15 331 | 31,3 | 21,4 | 0/5 |
+| 6 | Boolean OR | ''goalkeeper penalty saves'' | 1 902 | 1 949 | 5,4 | 10,2 | 2/5 |
+| 7 | Boolean AND | ''%%+goalkeeper +penalty%%'' | 1 902 | 37 | 3,3 | 7,7 | 1/5 |
+| 8 | Term | ''ballon'' | 6 | 27 | 0,0 | 3,5 | 4/5 |
+| 9 | Boolean NOT | ''%%ballon -nationality:france%%'' | 1 929 | 23 | 5,4 | 2,9 | 4/5 |
+| 10 | Fuzzy | ''%%modrc~%%'' | 0 | 422 | 0,0 | 122,0 | 0/5 |
+| 11 | Pole + AND + Range | ''%%+youth_clubs:ajax striker age<23%%'' | 107 | 47 | 50,9 | 5,5 | 1/5 |
+| 12 | Pole (wiki) | ''%%birth_place:zagreb%%'' | 147 | 41 | 0,3 | 1,4 | 0/5 |
+
+  * **Presnosť:** fráza, AND a NOT zúžia výsledky (dopyty 2, 7, 9). Pri NOT starý index naopak pridá Francúzov a Dembélé je prvý, Lucene ho vylúči.
+  * **Preklepy:** ''%%modrc~%%'' starý index nenájde nič, Lucene má Modriča prvého.
+  * **Wiki:** ''ballon'' starý index nájde u 6 hráčov, Lucene u 27 (Modrić iba cez wiki). ''%%birth_place:zagreb%%'' vráti 41 rodákov zo Záhrebu, starý index 147 hráčov so slovom Zagreb kdekoľvek.
+  * **Slabina:** pri ''young striker ajax academy'' dá Lucene na vrch hráčov s priezviskom Young (pole name má váhu 3). Lepšie je hľadať v poli, napr. ''%%+youth_clubs:ajax striker%%''.
+  * **Rýchlosť:** oba v milisekundách. Lucene je rýchlejší pri filtroch (filtre starého indexu prechádzajú v Pythone všetkých hráčov), pomalší pri fuzzy (122 ms, prechádza slovník termov v 14 poliach).
+
+===== 7. Evaluácia: Google a vyhľadávanie na worldfootball.com =====
+
+  * **Systémy:** starý index, Lucene, Google s ''site:worldfootball.com'' (anonymné okno), vyhľadávanie v hlavičke worldfootball.com. Hľadané 19. 11. 2026, porovnáva sa top 5. Naše výsledky vypíše ''lucene.cmd evaluate''.
+  * **Relevancia:** relevantný je konkrétny hráč, ktorý spĺňa potrebu (overené v dátach, pri Zlatej lopte podľa zoznamu víťazov). Stránka tímu, súťaže, správ či PDF relevantná nie je. Relevantné výsledky sú v tabuľkách **tučne**.
+
+^ # ^ Informačná potreba ^ Náš dopyt ^ Google (site:worldfootball.com ...) ^ worldfootball ^
+| 1 | Angličania, ktorí hrajú alebo hrali za Real Madrid | ''%%"real madrid" nationality=england%%'' | english players real madrid | real madrid |
+| 2 | Nemeckí brankári vyšší ako 195 cm | ''%%goalkeeper nationality=germany height>=195%%'' | german goalkeeper height 195 cm | goalkeeper |
+| 3 | Odchovanci Ajaxu mladší ako 23 rokov | ''%%youth_clubs:ajax age<23%%'' | ajax academy players under 23 | ajax |
+| 4 | Hráči narodení v Záhrebe | ''%%birth_place:zagreb%%'' | players born in zagreb | zagreb |
+| 5 | Luka Modrić napísaný s preklepom | ''%%modrc~%%'' | modrc | modrc |
+| 6 | Víťazi Zlatej lopty (Ballon d'Or) | ''%%"ballon d'or"%%'' | ballon d'or winners | ballon d'or |
+
+Relevantné / zobrazené výsledky v top 5:
+
+^ # ^ Informačná potreba ^ Starý index ^ Lucene ^ Google ^ worldfootball ^
+| 1 | Angličania v Reale Madrid | 2/5 | 3/3 | 0/5 | 0/5 |
+| 2 | Nemeckí brankári nad 195 cm | 5/5 | 5/5 | 0/0 | 0/0 |
+| 3 | Odchovanci Ajaxu do 23 rokov | 5/5 | 5/5 | 0/5 | 0/5 |
+| 4 | Narodení v Záhrebe | 2/5 | 5/5 | 0/4 | 0/5 |
+| 6 | Víťazi Zlatej lopty | 2/5 | 3/5 | 0/1 | 0/5 |
+| | **Spolu (presnosť)** | **16/25 (64 %)** | **21/23 (91 %)** | **0/15 (0 %)** | **0/20 (0 %)** |
+| 5 | Modrić s preklepom (poradie hľadaného hráča) | nenájdený | **1. miesto** | nenájdený | nenájdený |
+
+==== 1. Angličania, ktorí hrajú alebo hrali za Real Madrid ====
+
+^ # ^ Starý index ^ Lucene ^ Google ^ worldfootball ^
+| 1 | **Jude Bellingham** | **Trent Alexander-Arnold** | Real Madrid - Squad (súpiska tímu) | Real Madrid (tím) |
+| 2 | **Trent Alexander-Arnold** | **Jude Bellingham** | Iñaki Williams (Athletic Bilbao) | Real Madrid (tím žien) |
+| 3 | Conor Gallagher (Atlético Madrid) | **Niall Mason** (mládež Realu podľa wiki) | Vysoke Myto (tím) | Real Madrid U19 II (tím) |
+| 4 | James Wright | | Deusto (tím) | Real Madrid P. Bajada (tím) |
+| 5 | Ben Knight | | Arenteiro (tím) | Ciudad Real Madrid Campo 3 (štadión) |
+
+==== 2. Nemeckí brankári vyšší ako 195 cm ====
+
+^ # ^ Starý index ^ Lucene ^ Google ^ worldfootball ^
+| 1 | **Alexander Weidinger** | **Lars Unnerstall** | žiadne výsledky | žiadne výsledky |
+| 2 | **Lukas Watkowiak** | **Silas Ostrzinski** | | |
+| 3 | **Bela Dumrath** | **Alexander Meyer** | | |
+| 4 | **Kaylen** | **Florian Stritzel** | | |
+| 5 | **Alexander Brunst** | **Alexander Weidinger** | | |
+
+==== 3. Odchovanci Ajaxu mladší ako 23 rokov ====
+
+^ # ^ Starý index ^ Lucene ^ Google ^ worldfootball ^
+| 1 | **Jinairo Johnson** | **Tom de Graaff** | výročná správa BVB (PDF) | Ajax (tím) |
+| 2 | **Luca Messori** | **Precious Ugwu** | Quinten Timber (odchovanec, ale 25 rokov) | Ajax (tím žien) |
+| 3 | **Paul Reverson** | **Paul Reverson** | Untitled (PDF) | Kévin Ajax (hráč s priezviskom Ajax) |
+| 4 | **Jeshurun Simeon** | **Ryan van de Pavert** | Latest football news (správy) | Ajax Asja (tím) |
+| 5 | **Mylo van der Lans** | **Skye Vink** | Námestovo (tím) | Ajax Amateurs (tím) |
+
+==== 4. Hráči narodení v Záhrebe ====
+
+^ # ^ Starý index ^ Lucene ^ Google ^ worldfootball ^
+| 1 | Noa Mikic (miesto narodenia neznáme) | **Marko Pjaca** | Muhamed Al-Ghoul (iba "Born in Croatia") | Zagreb (tím) |
+| 2 | Ivan Nevistic (narodený v Đakove) | **Borna Sosa** | Presidente Hayes (tím) | Zagreb City (tím) |
+| 3 | **Luka Stojkovic** | **Josko Gvardiol** | Qormi (tím) | Dinamo Zagreb (tím) |
+| 4 | Marko Zebic (miesto narodenia neznáme) | **Art Smakaj** | Lija Athletic (tím) | Vrapče Zagreb (tím) |
+| 5 | **Luka Vrbancic** | **Ivan Fiolic** | | Dubrava Zagreb (tím) |
+
+==== 5. Luka Modrić napísaný s preklepom (modrc) ====
+
+^ # ^ Starý index ^ Lucene ^ Google ^ worldfootball ^
+| 1 | 0 výsledkov | **Luka Modrić** | Tai Luka Modric (iný hráč, Slovinsko) | Lehel-Hunor Modra |
+| 2 | | Jakub Moder | Celje vs Aluminij (zápas) | |
+| 3 | | Jakov Medic | | |
+| 4 | | Kieffer Moore | | |
+| 5 | | Mikey Moore | | |
+
+==== 6. Víťazi Zlatej lopty (Ballon d'Or) ====
+
+^ # ^ Starý index ^ Lucene ^ Google ^ worldfootball ^
+| 1 | **Ousmane Dembélé** | **Ousmane Dembélé** | Latest football news (správy) | Camilo César Jiménez Ballón |
+| 2 | **Rodri** | **Rodri** | | Josepmir Ballón |
+| 3 | Vinicius Junior | Lamine Yamal | | Lucas Ballón |
+| 4 | Vitinha | **Luka Modrić** | | Monica Belen Ballon Paye |
+| 5 | Lamine Yamal | Vinicius Junior | | Vincchenzo Luck Giovanni Ballón Quiróz |
+
+==== Zistenia ====
+
+  * **Otázky podľa atribútov vie zodpovedať iba náš systém.** Google ani worldfootball nemajú v top 5 ani jedného relevantného hráča. Krajina, pozícia, výška, vek, miesto narodenia či mládežnícke kluby sú v našom indexe samostatné polia a filtre.
+  * **worldfootball.com** hľadá iba v názvoch tímov, súťaží, osôb a štadiónov: ''ballon d'or'' vráti hráčov s priezviskom Ballón, preklep ''modrc'' nezvládne.
+  * **Google** vracia hlavne stránky tímov, správy a PDF. Preklep opraví na ''modric'', ale nájde iného hráča (Tai Luka Modric zo Slovinska).
+  * **Lucene oproti starému indexu:** pri filtroch (2, 3) rovnako dobrý, lepší pri fráze (1), poli z wiki (4), preklepe (5) aj vďaka textu z wiki (6).
+  * **Obmedzenia:** fulltext nerozlíši víťaza Zlatej lopty od nominovaného (Vinicius Junior, Lamine Yamal). Harry Kane, držiteľ Zlatej lopty podľa Googlu, ju v bio ani wiki abstrakte nemá, preto ho systém nenájde.
+
+===== 8. Testy =====
+
+  * **66 unit testov**, všetky prechádzajú (''lucene.cmd test''; na Windows ''py main.py test'' preskočí 11 Lucene testov).
+    * ''tests/test_extractor.py'' (28): regex extraktor HTML z prvej časti.
+    * ''tests/test_wiki.py'' (20): parser wiki (celá stránka z dumpu, vnorený infobox, dátumy, výška, čistenie wikitextu) a porovnanie mien pri joine (Gromov a Hromov, Paul Martin, Rodri).
+    * ''tests/test_lucene.py'' (18): prevod veku na rozsah dátumov (deň po dni aj okolo 29. 2.), polia dokumentu a dopyty nad malým indexom v pamäti (fráza nespojí dva kluby, fuzzy, bez diakritiky, pole, AND/NOT, stemming, všetky filtre, filter nemení skóre, neplatný dopyt).
+
+===== 9. ZIP s kódom =====
+
+{{:user:marek.penzes:vinf_kod_2.zip|ZIP s kódom}}
+
+Súbory z prvej časti (crawler, extraktor, starý index, vyhľadávanie) sú opísané pri prvom odovzdaní. Nové v druhej časti:
+
+^ Súbor ^ Na čo ^
+| ''spark_extract.py'' | extrakcia HTML v Sparku |
+| ''spark_utils.py'' | Spark session, čítanie TSV, zápis výstupu po partíciách |
+| ''wiki_extract.py'' | Spark job: filter wiki dumpu a parsovanie stránok |
+| ''wikitext.py'' | regex parser wikitextu (infobox, dátumy, výška, kariéra, text) |
+| ''wiki_join.py'' | Spark job: join hráčov s wiki, porovnanie mien |
+| ''lucene_index.py'' | návrh polí, analyzéry, stavba Lucene indexu |
+| ''lucene_search.py'' | dopyt -> Lucene Query, vyhľadávanie |
+| ''lucene_server.py'' | HTTP server nad Lucene indexom |
+| ''lucene_compare.py'' | porovnanie starého a nového indexu |
+| ''evaluate.py'' | výsledky na evaluáciu (Google, worldfootball) |
+| ''lucene.cmd'' | spustenie príkazov s PyLucene v Docker kontajneri |
+| ''diagram.md'' | diagramy architektúry (Mermaid) |
+| ''tests/test_wiki.py'', ''tests/test_lucene.py'' | unit testy |
+| ''requirements.txt'' | pyspark, poznámka k PyLucene v Dockeri |
