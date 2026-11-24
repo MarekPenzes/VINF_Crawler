@@ -1,4 +1,5 @@
-"""Regex parser stranok z wiki dumpu: infobox futbalistu, uvodny text clanku a kategorie.
+"""Regex parser stranok z wiki dumpu: infobox futbalistu, sucet z tabulky Career statistics,
+uvodny text clanku a kategorie.
 
 Vstup je jeden zaznam <page>...</page> z XML dumpu, text clanku (wikitext) je v <text> a XML
 entity (&lt; &amp; ...) sa najprv dekoduju. Vnorene sablony {{...}} a odkazy [[...]] samotny
@@ -8,7 +9,8 @@ import html
 import re
 
 WIKI_COLS = ["id", "title", "name", "full_name", "birth_date", "birth_place", "height_cm",
-             "position", "current_club", "youth_clubs", "clubs", "national_teams", "categories",
+             "position", "current_club", "youth_clubs", "clubs", "national_teams",
+             "national_team", "nat_apps", "nat_goals", "club_apps", "club_goals", "categories",
              "abstract", "url"]
 WIKI_URL = "https://en.wikipedia.org/wiki/"
 LIST_SEP = "; "                                   # oddelovac poloziek v jednom stlpci (kluby ...)
@@ -40,6 +42,13 @@ RE_HEADING = re.compile(r"^=+[^=\n]+=+\s*$", re.M)
 RE_CATEGORY = re.compile(r"\[\[\s*Category\s*:\s*([^\]|]+)", re.I)
 RE_PAREN = re.compile(r"\s*\([^)]*\)\s*$")       # "Rodri (footballer, born 1996)" -> "Rodri"
 RE_NUMBER = re.compile(r"(\d+)")
+
+# riadok "Career total" tabulky Career statistics, bunky na jednom alebo viacerych riadkoch
+RE_CAREER_TOTAL = re.compile(r"^[!|][^\n]*?career\s+total\b(.*?)(?=\n\|-|\n\|\}|\Z)", re.I | re.M | re.S)
+RE_CELL_SEP = re.compile(r"\n[!|]|!!|\|\|")
+MAX_APPS = 1500                                   # viac zapasov = chyba v tabulke
+# reprezentacia, ktora nie je A-tim: England U21, Spain Under-19, Brazil Olympic, England B
+RE_YOUTH_TEAM = re.compile(r"\s*\b(?:U-?\d{2}|Under-?\s?\d{2}|Olympic|B|XI|Amateurs?|Youth)\b", re.I)
 
 # sablony, z ktorych sa ponecha text argumentov (ostatne sa zmazu: flagicon, cite, efn ...)
 KEEP_ARGS = {"nowrap", "small", "nobold", "nobr", "br entries", "ubl", "unbulleted list", "plainlist",
@@ -218,8 +227,8 @@ def numbered(fields):
     return [rows[i] for i in sorted(rows)]
 
 
-def career(rows, prefix=""):
-    """Riadky kariery z ocislovanych poli -> "2018-2021 Arsenal (70/12); ..." (roky, tim, zapasy/goly).
+def career_rows(rows, prefix=""):
+    """Riadky kariery z ocislovanych poli -> [(roky, tim, zapasy, goly)], riadky bez timu sa vynechaju.
     prefix: "" pre kluby (years, clubs, caps, goals), "national" pre reprezentaciu, "youth" pre mladez."""
     team_key = {"": "clubs", "national": "nationalteam", "youth": "youthclubs"}[prefix]
     items = []
@@ -230,9 +239,49 @@ def career(rows, prefix=""):
         years = clean(row.get(prefix + "years", "")).replace("\u2013", "-").replace(" ", "")   # pomlcka
         caps = find(RE_NUMBER, clean(row.get(prefix + "caps", "")))
         goals = find(RE_NUMBER, clean(row.get(prefix + "goals", "")))
-        stats = f" ({caps}/{goals or 0})" if caps else ""
+        items.append((years, team, caps, goals or ("0" if caps else "")))
+    return items
+
+
+def career(rows, prefix=""):
+    """Riadky kariery -> "2018-2021 Arsenal (70/12); ..." (roky, tim, zapasy/goly)."""
+    items = []
+    for years, team, caps, goals in career_rows(rows, prefix):
+        stats = f" ({caps}/{goals})" if caps else ""
         items.append(f"{years} {team}{stats}".strip())
     return LIST_SEP.join(items)
+
+
+def main_national_team(rows):
+    """Hlavna reprezentacia ako na worldfootball: A-tim s najviac zapasmi -> (tim, zapasy, goly).
+    Hrac iba s mladeznickymi vybermi dostane krajinu bez pripony (England U21 -> England) bez zapasov."""
+    teams = career_rows(rows, "national")
+    senior = [(team, caps, goals) for _, team, caps, goals in teams if not RE_YOUTH_TEAM.search(team)]
+    if senior:
+        return max(senior, key=lambda item: int(item[1] or 0))
+    if teams:
+        return RE_YOUTH_TEAM.sub("", teams[0][1]).strip(), "", ""
+    return "", "", ""
+
+
+def club_totals(text):
+    """Zapasy a goly za kluby vo vsetkych sutaziach, rovnaky vyznam ako Career total na worldfootball.
+    Beru sa z riadku "Career total" tabulky Career statistics, posledne dve cisla su stlpec Total.
+    Infobox ma iba ligove zapasy, preto sa nepouzije. Ma tento riadok aj tabulka reprezentacie,
+    berie sa riadok s najviac zapasmi (klubov je vzdy viac). ("", "") ak clanok tabulku nema."""
+    best = None
+    for m in RE_CAREER_TOTAL.finditer(text):
+        numbers = []
+        for cell in RE_CELL_SEP.split(m.group(1)):
+            value = clean(cell).rsplit("|", 1)[-1].replace(",", "").strip()   # bez atributov colspan=2|
+            if value.isdigit():
+                numbers.append(int(value))
+        if len(numbers) < 2:
+            continue
+        apps, goals = numbers[-2:]
+        if 0 < apps <= MAX_APPS and goals <= apps and (best is None or apps > best[0]):
+            best = (apps, goals)
+    return (str(best[0]), str(best[1])) if best else ("", "")
 
 
 def head_of(text):
@@ -265,6 +314,8 @@ def parse_page(page):
     head = head_of(text)
     title = html.unescape(find(RE_TITLE, page))
     rows = numbered(fields)
+    national_team, nat_apps, nat_goals = main_national_team(rows)
+    club_apps, club_goals = club_totals(text)
     return {
         "id": find(RE_PAGE_ID, page),
         "title": title,
@@ -278,6 +329,8 @@ def parse_page(page):
         "youth_clubs": career(rows, "youth"),
         "clubs": career(rows),
         "national_teams": career(rows, "national"),
+        "national_team": national_team, "nat_apps": nat_apps, "nat_goals": nat_goals,
+        "club_apps": club_apps, "club_goals": club_goals,
         "categories": LIST_SEP.join(c.strip() for c in RE_CATEGORY.findall(text)),
         "abstract": lead(head, box),
         "url": WIKI_URL + title.replace(" ", "_"),

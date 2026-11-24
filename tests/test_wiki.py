@@ -7,8 +7,8 @@ Spustenie z korena projektu: py -m unittest discover -s tests -v"""
 import unittest
 
 from wiki_join import name_score
-from wikitext import (clean, head_of, infobox, lead, month_number, parse_date, parse_height,
-                      parse_page, title_name)
+from wikitext import (clean, club_totals, head_of, infobox, lead, main_national_team, month_number,
+                      numbered, parse_date, parse_height, parse_page, title_name)
 
 # stranka v tvare z XML dumpu (text clanku ma XML entity &lt; &gt;)
 PAGE = """<page>
@@ -69,6 +69,8 @@ class TestParsePage(unittest.TestCase):
             "height_cm": "180", "position": "Right-back", "current_club": "Liverpool",
             "categories": "2003 births; Liverpool F.C. players",
             "url": "https://en.wikipedia.org/wiki/Conor_Bradley",
+            "national_team": "Northern Ireland", "nat_apps": "30", "nat_goals": "4",
+            "club_apps": "", "club_goals": "",                    # clanok nema tabulku Career statistics
         }
         for field, value in expected.items():
             with self.subTest(field=field):
@@ -93,6 +95,57 @@ class TestParsePage(unittest.TestCase):
     def test_not_article_or_without_infobox(self):
         self.assertIsNone(parse_page(PAGE.replace("<ns>0</ns>", "<ns>2</ns>")))
         self.assertIsNone(parse_page("<page><title>X</title><ns>0</ns><id>1</id><text>No box.</text></page>"))
+
+
+# reprezentacia (mladez aj A-tim) a tabulky Career statistics, podla clanku Davida Beckhama
+STATS = """{{Infobox football biography
+| name = David Beckham
+| nationalyears1 = 1992-1993 | nationalteam1 = [[England national under-18 football team|England U18]]
+| nationalcaps1 = 3 | nationalgoals1 = 0
+| nationalyears2 = 1994-1996 | nationalteam2 = [[England national under-21 football team|England U21]]
+| nationalcaps2 = 9 | nationalgoals2 = 0
+| nationalyears3 = 1996-2009 | nationalteam3 = [[England national football team|England]]
+| nationalcaps3 = 115 | nationalgoals3 = 17
+}}
+==Career statistics==
+===Club===
+{| class="wikitable" style="text-align:center"
+|+ Appearances and goals by club, season and competition
+!rowspan="2"|Club!!rowspan="2"|Season!!colspan="2"|League!!colspan="2"|Other!!colspan="2"|Total
+|-
+|Manchester United||1994-95||4||0||colspan="2"|{{n/a}}||10||1
+|-
+!colspan="2"|Career total
+!523!!97!!colspan="2"|{{n/a}}!!{{0}}718!!'''129'''<ref>{{cite web|title=Stats}}</ref>
+|}
+===International===
+{| class="wikitable"
+!colspan="2"|Career total!!115!!17
+|}"""
+
+
+class TestCareerStats(unittest.TestCase):
+    """Cisla z wiki s rovnakym vyznamom ako na worldfootball (hlavna A-reprezentacia, Career total)."""
+
+    def test_main_national_team_is_senior(self):
+        self.assertEqual(main_national_team(numbered(infobox(STATS)[2])), ("England", "115", "17"))
+
+    def test_senior_team_with_most_caps(self):
+        rows = [{"nationalteam": "Yugoslavia", "nationalcaps": "10", "nationalgoals": "1"},
+                {"nationalteam": "[[Croatia national football team|Croatia]]", "nationalcaps": "50"}]
+        self.assertEqual(main_national_team(rows), ("Croatia", "50", "0"))
+
+    def test_youth_only_gives_country_without_caps(self):
+        rows = [{"nationalteam": "England U21", "nationalcaps": "9", "nationalgoals": "0"}]
+        self.assertEqual(main_national_team(rows), ("England", "", ""))
+        self.assertEqual(main_national_team([]), ("", "", ""))
+
+    def test_club_totals_from_career_total_row(self):
+        # posledne dve cisla riadku = stlpec Total; bunka colspan=2|{{n/a}} nie je cislo
+        self.assertEqual(club_totals(STATS), ("718", "129"))
+
+    def test_club_totals_missing(self):
+        self.assertEqual(club_totals("'''X''' is a footballer. His career total was 300 games."), ("", ""))
 
 
 class TestInfobox(unittest.TestCase):

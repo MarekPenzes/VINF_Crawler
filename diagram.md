@@ -71,12 +71,13 @@ flowchart TD
         READ --> JVM{"filter v JVM:<br/>článok (ns 0) s infoboxom<br/>football biography?"}
         JVM -- "nie" --> DROP["zahodiť"]
         JVM -- "áno" --> PARTS[("data/wiki/football/<br/>215 561 stránok, 1,8 GB")]
-        PARTS --> PARSE["regex parser<br/>infobox, dátum, výška, kariéra,<br/>úvodný text, kategórie"]
+        PARTS --> PARSE["regex parser<br/>infobox, dátum, výška, kariéra,<br/>reprezentácia, Career total,<br/>úvodný text, kategórie"]
         PARSE --> DEDUP["duplicity podľa id stránky<br/>reduceByKey"] --> WT[("wiki_players.tsv<br/>215 561 hráčov")]
     end
 
     subgraph JN["py main.py join (wiki_join.py)"]
-        JOIN["join na dátume narodenia<br/>+ porovnanie mien"] --> JT[("joined.tsv<br/>12 477 hráčov<br/>12 472 wiki stránok")]
+        JOIN["páry: join na dátume narodenia<br/>+ porovnanie mien"] --> FULL["full outer join<br/>hráči + páry + wiki stránky"]
+        FULL --> JT[("joined.tsv, 221 912 riadkov<br/>12 477 z oboch zdrojov<br/>6 346 iba worldfootball<br/>203 089 iba wiki")]
     end
 
     PT --> JOIN
@@ -86,7 +87,8 @@ flowchart TD
 ## 4. Join hráčov s wiki
 
 worldfootball nemá odkaz na Wikipédiu, samotné meno nestačí (menovci, mononymy, iný prepis).
-Kľúčom je dátum narodenia a na dvojiciach s rovnakým dátumom sa porovnajú mená.
+Kľúčom páru je dátum narodenia a na dvojiciach s rovnakým dátumom sa porovnajú mená.
+Nakoniec full outer join, aby sa nestratil žiadny hráč ani wiki stránka.
 
 ```mermaid
 flowchart TD
@@ -98,5 +100,10 @@ flowchart TD
     C -- "áno" --> PAIRS["12 501 dvojíc<br/>skóre = priemerná podobnosť"]
     PAIRS --> B1["pre hráča najvyššie skóre<br/>remíza = vynechať"]
     B1 --> B2["pre stránku najvyššie skóre<br/>remíza = vynechať,<br/>okrem skóre 1 (duplicitný profil)"]
-    B2 --> J[("joined.tsv<br/>12 477 hráčov, 12 472 stránok")]
+    B2 --> M["páry hráč - stránka<br/>12 477 hráčov, 12 472 stránok"]
+    M --> L["left join so všetkými hráčmi<br/>(hráč bez páru: wiki stĺpce prázdne)"]
+    P --> L
+    L --> FO["full outer join na wiki_id<br/>(+ wiki stránky bez hráča)"]
+    W --> FO
+    FO --> J[("joined.tsv, 221 912 riadkov<br/>source: both 12 477,<br/>worldfootball 6 346, wiki 203 089")]
 ```

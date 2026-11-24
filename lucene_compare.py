@@ -6,6 +6,7 @@ uvodzovky, ~, + a - jeho tokenizer zahodi, takze fraza, preklep aj AND/NOT su pr
 Filtre (filters.py) funguju v oboch indexoch rovnako. Cas je najlepsi z --runs behov dopytu tak,
 ako ho robi aplikacia (pocet vysledkov a top k): stary index vzdy oboduje a zoradi vsetkych
 kandidatov, Lucene vrati iba top k a pocet zisti bez citania dokumentov (IndexSearcher.count).
+Lucene index ma navyse hracov iba z wiki (full outer join), vo vypise maju znacku [w].
 
 Pouzitie: lucene.cmd lucene-compare > data\\lucene_compare.txt
           lucene.cmd lucene-compare --top 10 --runs 5"""
@@ -57,11 +58,15 @@ def timed(search, runs):
     return results, best * 1000
 
 
-def cell(players, result):
+def lucene_name(new, key):
+    """Meno hraca z Lucene dokumentu, hrac iba z wiki so znackou [w]."""
+    record = new.record(key)
+    return record["name"] + (" [w]" if record["source"] == "wiki" else "")
+
+
+def cell(name, score):
     """Bunka tabulky: meno hraca (skratene) a skore; dopyt iba s filtrami skore nema."""
-    doc_id, score = result
     score_text = f" ({score:.3f})" if score is not None else ""
-    name = players[doc_id]["name"]
     room = NAME_WIDTH - 2 - len(score_text)
     if len(name) > room:
         name = name[:room - 3] + "..."
@@ -76,8 +81,11 @@ def compare_query(old, new, number, kind, text, raw_filters, args):
     (new_count, new_top), new_ms = timed(
         lambda: (new.count(text, filters), new.search(text, filters, args.top)), args.runs)
     old_count = len(old_results)
-    tops = [old_results[:args.top], new_top]
-    overlap = len({doc_id for doc_id, _ in tops[0]} & {doc_id for doc_id, _ in tops[1]})
+    old_top = old_results[:args.top]
+    # stary index ma cele cisla, Lucene text ("123", hrac iba z wiki "w4567")
+    overlap = len({str(doc_id) for doc_id, _ in old_top} & {key for key, _ in new_top})
+    columns = [[(old.players[doc_id]["name"], score) for doc_id, score in old_top],
+               [(lucene_name(new, key), score) for key, score in new_top]]
     query = " ".join(filter(None, [text, *raw_filters]))
 
     print(f"\n=== {number}. {kind}: {query} ===")
@@ -86,8 +94,8 @@ def compare_query(old, new, number, kind, text, raw_filters, args):
     print("      " + f"TF-IDF ({args.idf})".ljust(NAME_WIDTH) + "Lucene (BM25)")
     print("      " + f"{old_count} hracov, {old_ms:.1f} ms".ljust(NAME_WIDTH)
           + f"{new_count} hracov, {new_ms:.1f} ms")
-    for rank in range(max(map(len, tops))):
-        cells = [cell(old.players, top[rank]) if rank < len(top) else " " * NAME_WIDTH for top in tops]
+    for rank in range(max(map(len, columns))):
+        cells = [cell(*column[rank]) if rank < len(column) else " " * NAME_WIDTH for column in columns]
         print(f"  {rank + 1:>2}. " + "".join(cells).rstrip())
     print(f"  Prekryv top {args.top}: {overlap}/{args.top}")
     return {"number": number, "query": query, "old": old_count, "new": new_count,

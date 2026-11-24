@@ -112,11 +112,19 @@ def index_stats():
 
 
 def wiki_stats():
-    """Wiki dump, stranky futbalistov (wiki_players.tsv) a join s nasimi hracmi (joined.tsv)."""
+    """Wiki dump, stranky futbalistov (wiki_players.tsv) a full outer join s nasimi hracmi (joined.tsv).
+    Oba subory maju stovky MB, preto sa citaju postupne a v pamati ostanu iba pripojeni hraci."""
     if not (os.path.exists(WIKI_FILE) and os.path.exists(JOIN_FILE)):
         return [("wiki_players.tsv alebo joined.tsv chyba", "spusti py main.py wiki a py main.py join")]
-    wiki = list(read_tsv(WIKI_FILE))
-    joined = list(read_tsv(JOIN_FILE))
+    n_wiki, wiki_filled = 0, Counter()
+    for row in read_tsv(WIKI_FILE):
+        n_wiki += 1
+        wiki_filled.update(col for col in WIKI_COLS if row[col])
+    sources, joined = Counter(), []                  # joined = iba pripojeni hraci (source both)
+    for row in read_tsv(JOIN_FILE):
+        sources[row["source"]] += 1
+        if row["source"] == "both":
+            joined.append(row)
     players = {player["id"]: player for player in read_tsv(PLAYERS_FILE)}
     with_date = sum(1 for player in players.values() if player["birth_date"])
     pages = glob.glob(os.path.join(WIKI_PAGES_DIR, "part-*.xml"))
@@ -135,19 +143,24 @@ def wiki_stats():
         ("vyfiltrovane stranky futbalistov (XML)", size_text(sum(os.path.getsize(path) for path in pages))),
         ("velkost wiki_players.tsv", size_text(os.path.getsize(WIKI_FILE))),
         ("velkost joined.tsv", size_text(os.path.getsize(JOIN_FILE))),
-        ("stranky futbalistov z wiki", len(wiki)),
+        ("stranky futbalistov z wiki", n_wiki),
+        ("riadky full outer joinu (joined.tsv)", sum(sources.values())),
+        ("iba worldfootball", sources["worldfootball"]),
+        ("iba wiki", sources["wiki"]),
         ("pripojeni hraci", len(joined)),
         ("podiel z hracov s datumom narodenia", percent(len(joined), with_date)),
         ("unikatne pripojene wiki stranky", len({row["wiki_id"] for row in joined})),
         ("presna zhoda mena (skore 1)", sum(1 for row in joined if float(row["match_score"]) == 1)),
         ("pripojeni bez bio, text z wiki (abstract)", sum(
             1 for row in joined if row["wiki_abstract"] and not players[row["player_id"]]["bio"])),
-        ("pripojeni bez vysky, vyska z wiki", gained("height_cm")),
     ]
+    # cisla, ktore wiki doplni pripojenym hracom, ak ich worldfootball nema
+    stats += [(f"pripojeni bez {col}, hodnota z wiki", gained(col))
+              for col in ["height_cm", "club_apps", "club_goals", "nat_apps", "nat_goals"]]
     # polia, ktore worldfootball nema vobec
     stats += [(f"pripojeni s {col} z wiki", filled(joined, f"wiki_{col}"))
               for col in ["full_name", "birth_place", "youth_clubs", "categories"]]
-    stats += [(f"wiki: vyplnene pole {col}", percent(filled(wiki, col), len(wiki)))
+    stats += [(f"wiki: vyplnene pole {col}", percent(wiki_filled[col], n_wiki))
               for col in WIKI_COLS if col not in ("id", "title", "url")]
     return stats
 

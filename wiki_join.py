@@ -1,10 +1,12 @@
-"""Spark job: join hracov z worldfootball (players.tsv) so strankami futbalistov z wiki
+"""Spark job: full outer join hracov z worldfootball (players.tsv) so strankami futbalistov z wiki
 (wiki_players.tsv) -> data/joined.tsv.
 
-Kluc joinu: datum narodenia (presna zhoda) a zhoda mena. worldfootball nema odkaz na wiki ani
-Wikidata a samotne meno nestaci (menovci, mononymy ako Rodri, Raphinha). Datum narodenia ma
-takmer kazdy hrac aj infobox, preto sa najprv spoja dvojice s rovnakym datumom (equi-join)
-a az na nich sa porovnaju mena:
+Vystup ma tri druhy riadkov (stlpec source): hrac z oboch zdrojov (both), iba z worldfootball
+(worldfootball) a iba z wiki (wiki). Nic sa nestrati, Lucene index ma dokument pre kazdy riadok.
+
+Par hrac - wiki stranka: worldfootball nema odkaz na wiki ani Wikidata a samotne meno nestaci
+(menovci, mononymy ako Rodri, Raphinha). Datum narodenia ma takmer kazdy hrac aj infobox, preto sa
+najprv spoja dvojice s rovnakym datumom (equi-join) a az na nich sa porovnaju mena:
 - tokeny mena bez diakritiky a velkych pismen ("Luka Modric" s diakritikou -> luka, modric),
   bez inicial a castic (al, de, van ...),
 - zo strany wiki sa beru tokeny titulku (bez dovetku v zatvorke), mena aj celeho mena,
@@ -16,16 +18,16 @@ a az na nich sa porovnaju mena:
 Kazdemu hracovi sa priradi stranka s najvyssim skore; ak ich je viac s rovnakym skore, hrac sa
 vynecha (nejednoznacne). To iste plati opacne, jedna stranka patri jednemu hracovi. Vynimkou je
 remiza so skore 1: to su duplicitne profily toho isteho hraca na worldfootball (Mauricio Benitez
-s diakritikou aj bez), tie ostanu vsetky."""
+s diakritikou aj bez), tie ostanu vsetky.
+Pary sa potom spoja s hracmi (left join) a s wiki strankami (full outer join)."""
 import argparse
 import time
 from difflib import SequenceMatcher
 
 from config import JOIN_FILE, PLAYERS_FILE, WIKI_FILE
-from spark_utils import MASTER, read_tsv_df, spark_session
+from spark_utils import MASTER, read_tsv_df, spark_session, write_tsv
 from tokenizer import RE_WORD, normalize
-from tsv import tsv_header, tsv_line
-from wikitext import title_name
+from wikitext import WIKI_COLS, title_name
 
 MIN_TOKEN = 2
 # casti mien, ktore sa neporovnavaju (Al-Thani, de Jong, van Dijk, bin Ali ...)
@@ -34,10 +36,8 @@ SIMILAR = 0.7         # min. podobnost tokenov (difflib ratio): Georgiy - Heorhi
 SIMILAR_LEN = 4       # kratsie tokeny sa porovnavaju iba presne alebo ako predpona
 PREFIX_LEN = 3        # skratene meno: Rob - Robert
 PREFIX_SCORE = 0.9
-# stlpce vystupu: nase id a meno, potom stlpce z wiki s predponou wiki_
-WIKI_ATTRS = ["id", "title", "url", "full_name", "birth_place", "height_cm", "position",
-              "current_club", "youth_clubs", "clubs", "national_teams", "categories", "abstract"]
-JOIN_COLS = ["player_id", "name", "birth_date", "match_score"] + [f"wiki_{c}" for c in WIKI_ATTRS]
+# stlpce vystupu: zdroj, nase id, meno a datum, skore paru, potom vsetky stlpce z wiki s predponou wiki_
+JOIN_COLS = ["source", "player_id", "name", "birth_date", "match_score"] + [f"wiki_{c}" for c in WIKI_COLS]
 
 
 def name_tokens(text):
@@ -90,55 +90,64 @@ def best_unique(df, key, keep_exact_ties=False):
 
 
 def join(spark):
-    """Vrati (DataFrame pripojenych dvojic, pocty pre suhrn)."""
+    """Vrati (DataFrame full outer joinu, pocty pre suhrn)."""
     from pyspark.sql import functions as F
     players = (read_tsv_df(spark, PLAYERS_FILE)
                .select(F.col("id").alias("player_id"), "name", "birth_date", "bio"))
     wiki = read_tsv_df(spark, WIKI_FILE)
-    wiki = wiki.select("birth_date", *[F.col(c).alias(f"wiki_{c}") for c in wiki.columns if c != "birth_date"])
+    wiki = wiki.select(*[F.col(c).alias(f"wiki_{c}") for c in wiki.columns])
     score = F.udf(name_score, "double")
     pairs = (players.where(F.col("birth_date").isNotNull())
-             .join(wiki.where(F.col("birth_date").isNotNull()), "birth_date")       # equi-join na datume
+             .join(wiki.where(F.col("wiki_birth_date").isNotNull()),
+                   F.col("birth_date") == F.col("wiki_birth_date"))                 # equi-join na datume
              .withColumn("match_score", score("name", "wiki_title", "wiki_name", "wiki_full_name"))
              .where(F.col("match_score") > 0)
              .cache())
-    joined = best_unique(best_unique(pairs, "player_id"), "wiki_id", keep_exact_ties=True).cache()
+    matches = (best_unique(best_unique(pairs, "player_id"), "wiki_id", keep_exact_ties=True)
+               .select("player_id", "wiki_id", "match_score")
+               .cache())
+    # kazdy hrac s wiki_id svojho paru (alebo null), potom full outer join so vsetkymi wiki strankami:
+    # hrac bez paru ostane bez wiki stlpcov, wiki stranka bez hraca bez nasich stlpcov
+    full = (players.join(matches, "player_id", "left")
+            .join(wiki, "wiki_id", "full_outer")
+            .withColumn("source", F.when(F.col("player_id").isNull(), "wiki")
+                        .when(F.col("wiki_id").isNull(), "worldfootball")
+                        .otherwise("both"))
+            .cache())
+    by_source = dict(full.groupBy("source").count().collect())
     counts = {
         "hraci (players.tsv)": players.count(),
         "hraci s datumom narodenia": players.where(F.col("birth_date").isNotNull()).count(),
         "stranky futbalistov z wiki": wiki.count(),
-        "stranky s datumom narodenia": wiki.where(F.col("birth_date").isNotNull()).count(),
+        "stranky s datumom narodenia": wiki.where(F.col("wiki_birth_date").isNotNull()).count(),
         "dvojice so zhodou datumu aj mena": pairs.count(),
-        "hraci s aspon jednym kandidatom": pairs.select("player_id").distinct().count(),
-        "pripojeni hraci": joined.count(),
-        "unikatne pripojene wiki stranky": joined.select("wiki_id").distinct().count(),
-        "pripojeni hraci bez bio (text iba z wiki)": joined.where(F.col("bio").isNull()).count(),
+        "pripojeni hraci (both)": by_source.get("both", 0),
+        "unikatne pripojene wiki stranky": matches.select("wiki_id").distinct().count(),
+        "pripojeni hraci bez bio (text iba z wiki)":
+            full.where((F.col("source") == "both") & F.col("bio").isNull()).count(),
+        "iba worldfootball": by_source.get("worldfootball", 0),
+        "iba wiki": by_source.get("wiki", 0),
     }
-    return joined, counts
-
-
-def save(rows):
-    with open(JOIN_FILE, "w", encoding="utf-8", newline="") as f:
-        f.write(tsv_header(JOIN_COLS))
-        for row in sorted(rows, key=lambda r: int(r["player_id"])):
-            f.write(tsv_line({c: row[c] if row[c] is not None else "" for c in JOIN_COLS}, JOIN_COLS))
+    return full, counts
 
 
 def run(master=MASTER):
     start = time.time()
     spark = spark_session("vinf-join", master)
-    joined, counts = join(spark)
-    rows = [row.asDict() for row in joined.select(*JOIN_COLS).collect()]
+    full, counts = join(spark)
+    # zapis po particiach (vystup ma stovky MB, nejde cez driver), null -> prazdna bunka
+    rows = (full.select(*JOIN_COLS).rdd
+            .map(lambda row: {col: "" if value is None else value for col, value in row.asDict().items()}))
+    n = write_tsv(rows, JOIN_COLS, JOIN_FILE)
     spark.stop()
-    save(rows)
     width = max(len(k) for k in counts)
     for key, value in counts.items():
         print(f"  {key:<{width}}  {value}")
-    print(f"Hotovo: {len(rows)} hracov -> {JOIN_FILE} ({time.time() - start:.0f} s)")
+    print(f"Hotovo: {n} riadkov full outer joinu -> {JOIN_FILE} ({time.time() - start:.0f} s)")
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Spark join players.tsv x wiki_players.tsv -> joined.tsv.")
+    parser = argparse.ArgumentParser(description="Spark full outer join players.tsv x wiki_players.tsv -> joined.tsv.")
     parser.add_argument("--master", default=MASTER, help=f"Spark master (default {MASTER})")
     args = parser.parse_args(argv)
     run(args.master)

@@ -7,7 +7,7 @@ Prikazy:
   search         vyhladavanie, TF-IDF alebo Lucene        py main.py search "left footed winger" "age<23" --idf prob
   compare        porovnanie idf metod na dopytoch         py main.py compare
   wiki           Spark: wiki dump -> wiki_players.tsv     py main.py wiki --parse-only
-  join           Spark: players.tsv x wiki -> joined.tsv  py main.py join
+  join           Spark: full outer join -> joined.tsv     py main.py join
   lucene-index   PyLucene index -> data/lucene            lucene.cmd lucene-index
   lucene-serve   server pre search --index lucene         lucene.cmd lucene-serve
   lucene-compare porovnanie TF-IDF a Lucene indexu        lucene.cmd lucene-compare

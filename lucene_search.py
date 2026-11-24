@@ -12,13 +12,19 @@ Typy dopytov:
 Filtre su v BooleanQuery ako FILTER: obmedzia vysledky, ale neovplyvnia skore.
 
 Pouzitie: lucene.cmd lucene-serve, potom py main.py search "\\"real madrid\\"" nationality=england --index lucene"""
-from config import LUCENE_DIR, PLAYERS_FILE
-from filters import NUMERIC_FIELDS, TEXT_FIELDS, birth_date_range
-from lucene_index import BOOSTS, DATE_FIELD, date_int, init_lucene, make_analyzer
-from search import describe_player
-from tsv import read_tsv
+from config import LUCENE_DIR
+from filters import NUMERIC_FIELDS, TEXT_FIELDS, age, birth_date_range
+from lucene_index import BOOSTS, DATE_FIELD, DISPLAY_FIELDS, date_int, init_lucene, make_analyzer
 
 INT_MIN, INT_MAX = -2**31, 2**31 - 1
+SOURCE_LABELS = {"both": "oba", "worldfootball": "worldfootball", "wiki": "wiki"}
+
+
+def describe_record(record):
+    """Udaje dokumentu na jeden riadok: meno (pozicia, klub, krajina, vek) [zdroj]."""
+    years = f"{age(record['birth_date'])} r." if record["birth_date"] else "vek ?"
+    parts = [record["position"] or "-", record["club"] or "-", record["nationality"] or "-", years]
+    return f"{record['name']} ({', '.join(parts)}) [{SOURCE_LABELS.get(record['source'], '?')}]"
 
 
 class QueryError(ValueError):
@@ -67,9 +73,10 @@ def filter_query(field, op, value, today=None):
 
 
 class LuceneEngine:
-    """Rovnake rozhranie ako search.SearchEngine: search() vrati [(doc_id, skore)], describe()."""
+    """Rovnake rozhranie ako search.SearchEngine: search() vrati [(id dokumentu, skore)], describe().
+    ID dokumentu je text: id hraca z worldfootball ("123") alebo "w" + id wiki stranky."""
 
-    def __init__(self, directory=None, players=None):
+    def __init__(self, directory=None):
         init_lucene()
         from java.lang import Float
         from java.nio.file import Paths
@@ -88,9 +95,6 @@ class LuceneEngine:
         for field, boost in BOOSTS.items():
             boosts.put(field, Float(boost))
         self.parser = MultiFieldQueryParser(list(BOOSTS), make_analyzer(), boosts)
-        if players is None:
-            players = {int(p["id"]): p for p in read_tsv(PLAYERS_FILE)}
-        self.players = players
 
     def query(self, text, filters=()):
         """Text + filtre -> BooleanQuery (text MUST a urcuje skore, filtre FILTER)."""
@@ -108,8 +112,8 @@ class LuceneEngine:
             builder.add(filter_query(field, op, value), BooleanClause.Occur.FILTER)
         return builder.build()
 
-    def search(self, query, filters=(), top=None):
-        """Najlepsich `top` vysledkov (None = vsetky) ako [(doc_id, skore)], najlepsie prve.
+    def hits(self, query, filters=(), top=None):
+        """Najlepsich `top` vysledkov (None = vsetky) ako [(cislo dokumentu v Lucene, skore)].
         Bez textu dopytu sa vratia hraci splnajuci filtre zoradeni podla mena (skore None)."""
         from org.apache.lucene.search import Sort, SortField
         if not query.strip() and not filters:
@@ -117,10 +121,13 @@ class LuceneEngine:
         lucene_query = self.query(query, filters)
         limit = top or max(1, self.reader.numDocs())
         if query.strip():
-            hits = self.searcher.search(lucene_query, limit).scoreDocs
-            return [(self.doc_id(hit.doc), hit.score) for hit in hits]
-        hits = self.searcher.search(lucene_query, limit, Sort(SortField("name_sort", SortField.Type.STRING))).scoreDocs
-        return [(self.doc_id(hit.doc), None) for hit in hits]
+            return [(hit.doc, hit.score) for hit in self.searcher.search(lucene_query, limit).scoreDocs]
+        by_name = Sort(SortField("name_sort", SortField.Type.STRING))
+        return [(hit.doc, None) for hit in self.searcher.search(lucene_query, limit, by_name).scoreDocs]
+
+    def search(self, query, filters=(), top=None):
+        """Najlepsich `top` vysledkov (None = vsetky) ako [(id dokumentu, skore)], najlepsie prve."""
+        return [(self.stored.document(doc).get("id"), score) for doc, score in self.hits(query, filters, top)]
 
     def count(self, query, filters=()):
         """Pocet vsetkych vysledkov bez citania dokumentov (IndexSearcher.count)."""
@@ -131,11 +138,21 @@ class LuceneEngine:
     def answer(self, text, filters=(), top=10):
         """(pocet vsetkych vysledkov, [(skore, popis hraca)] pre prvych top) na vypis a pre server.
         Cita sa iba top dokumentov, nie vsetky vysledky (pri sirokom dopyte ich su tisice)."""
-        results = self.search(text, filters, top)
-        return self.count(text, filters), [(score, self.describe(doc_id)) for doc_id, score in results]
+        rows = [(score, describe_record(self.stored_record(doc))) for doc, score in self.hits(text, filters, top)]
+        return self.count(text, filters), rows
 
-    def doc_id(self, lucene_doc):
-        return int(self.stored.document(lucene_doc).get("id"))
+    def stored_record(self, doc):
+        """Udaje na vypis ulozene v dokumente (show_*) ako {pole: hodnota}, chybajuce = ""."""
+        document = self.stored.document(doc)
+        return {"id": document.get("id"),
+                **{field: document.get(f"show_{field}") or "" for field in DISPLAY_FIELDS}}
 
-    def describe(self, doc_id):
-        return describe_player(self.players[doc_id])
+    def record(self, key):
+        """Udaje na vypis pre id dokumentu ("123" alebo "w4567"), None ak taky dokument nie je."""
+        from org.apache.lucene.index import Term
+        from org.apache.lucene.search import TermQuery
+        hits = self.searcher.search(TermQuery(Term("id", key)), 1).scoreDocs
+        return self.stored_record(hits[0].doc) if hits else None
+
+    def describe(self, key):
+        return describe_record(self.record(key))
